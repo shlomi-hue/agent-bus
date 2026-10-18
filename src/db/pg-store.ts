@@ -468,6 +468,21 @@ export class PgStore implements Store {
     return result.rows.map((row) => summarize(mapAgent({ ...row, token_hash: "" })));
   }
 
+  async findPlanApproval(roomId: string, planId: string): Promise<Message | null> {
+    const result = await this.db.query<MessageRow>(
+      `${MESSAGE_SELECT}
+       where m.room_id = $1
+         and m.metadata->>'kind' = 'plan_decision'
+         and m.metadata->>'planId' = $2
+         and m.body like 'Approved the plan %'
+       order by m.created_at asc
+       limit 1`,
+      [roomId, planId],
+    );
+    const row = result.rows[0];
+    return row ? mapMessage(row) : null;
+  }
+
   async listRoomMessages(query: RoomLogQuery): Promise<Message[]> {
     if (query.since) {
       const result = await this.db.query<MessageRow>(

@@ -101,7 +101,9 @@ export function chatPage(): string {
         <form id="composer" class="composer" hidden>
           <p id="pause" class="pause" role="status" hidden></p>
           <label class="sr" for="body">Write a message</label>
-          <textarea id="body" rows="1" placeholder="Write a message" aria-label="Write a message"></textarea>
+          <div id="mention-pop" class="mention-pop" role="listbox" aria-label="Mention an agent" hidden></div>
+          <textarea id="body" rows="1" placeholder="Write a message" aria-label="Write a message" aria-autocomplete="list" aria-controls="mention-pop" aria-expanded="false"></textarea>
+          <div id="mention-hints" class="mention-hints" aria-live="polite" hidden></div>
           <div class="tb">
             <button class="icon-btn" type="button" id="insert-at" title="Mention an agent">@</button>
             <span class="sp"></span>

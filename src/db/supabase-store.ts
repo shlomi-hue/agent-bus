@@ -543,6 +543,20 @@ export class SupabaseStore implements Store {
     return members.sort((a, b) => a.name.localeCompare(b.name));
   }
 
+  async findPlanApproval(roomId: string, planId: string): Promise<Message | null> {
+    const { data, error } = await this.client
+      .from("messages")
+      .select(MESSAGE_COLUMNS)
+      .eq("room_id", roomId)
+      .contains("metadata", { kind: "plan_decision", planId })
+      .like("body", "Approved the plan %")
+      .order("created_at", { ascending: true })
+      .limit(1);
+    if (error) raise(error);
+    const row = ((data ?? []) as unknown as MessageRow[])[0];
+    return row ? mapMessage(row) : null;
+  }
+
   async listRoomMessages(query: RoomLogQuery): Promise<Message[]> {
     let request = this.client.from("messages").select(MESSAGE_COLUMNS).eq("room_id", query.roomId).limit(query.limit);
     if (query.since) {

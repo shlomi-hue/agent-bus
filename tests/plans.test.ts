@@ -439,8 +439,8 @@ describe("plans, results, and owner routes", () => {
     expect(recoverNotes).toHaveLength(1);
   });
 
-  it("resumes an executing plan that is missing tasks and does not post approval again", async () => {
-    const { store, config, bus, owner, claude, caller } = await fixture();
+  it("resumes an executing plan that is missing tasks and posts approval once", async () => {
+    const { store, config, bus, owner, codex, claude, caller } = await fixture();
     const proposed = await callTool(
       bus,
       caller(claude),
@@ -489,6 +489,8 @@ describe("plans, results, and owner routes", () => {
     const approvedBefore = (
       await store.listRoomMessages({ roomId: room?.id ?? "", since: null, limit: 30 })
     ).filter((message) => message.body.startsWith("Approved the plan"));
+    expect(approvedBefore).toHaveLength(0);
+    expect((await store.listDeliveries(codex.id)).some((row) => row.event === "mention")).toBe(false);
     const retried = await bus.decidePlan(caller(owner), planId, "approve");
     expect(retried.plan.status).toBe("executing");
     expect(retried.plan.items.every((item) => item.taskId)).toBe(true);
@@ -497,11 +499,84 @@ describe("plans, results, and owner routes", () => {
     const approvedAfter = (
       await store.listRoomMessages({ roomId: room?.id ?? "", since: null, limit: 30 })
     ).filter((message) => message.body.startsWith("Approved the plan"));
-    expect(approvedAfter).toHaveLength(approvedBefore.length);
+    expect(approvedAfter).toHaveLength(1);
+    expect((await store.listDeliveries(codex.id)).some((row) => row.event === "mention")).toBe(true);
     expect((await store.listDeliveries(claude.id)).some((row) => row.event === "mention")).toBe(true);
     await expect(bus.decidePlan(caller(owner), planId, "approve")).rejects.toThrow(
       /Cannot approve a plan that is executing/,
     );
+    const approvedFinal = (
+      await store.listRoomMessages({ roomId: room?.id ?? "", since: null, limit: 30 })
+    ).filter((message) => message.body.startsWith("Approved the plan"));
+    expect(approvedFinal).toHaveLength(1);
+  });
+
+  it("wakes every open assignee on retry and posts Approved only when it is missing", async () => {
+    const { store, config, bus, owner, codex, claude, grok, caller } = await fixture();
+    const proposed = await callTool(
+      bus,
+      caller(claude),
+      "propose_plan",
+      {
+        room: "build",
+        title: "Retry the wake",
+        summary: "The first assignee was never woken.",
+        tasks: [
+          { title: "First slice", assignee: "codex", estimate: "10m" },
+          { title: "Second slice", assignee: "claude", estimate: "10m" },
+          { title: "Third slice", assignee: "grok", estimate: "10m" },
+        ],
+      },
+      config,
+    );
+    const planId = proposed.content[0]?.text.match(/Plan ([0-9a-f-]{36})/)?.[1] ?? "";
+    const original = store.insertTasks.bind(store);
+    let attempts = 0;
+    store.insertTasks = async (inputs) => {
+      attempts += 1;
+      if (attempts === 3) throw new Error("insert failed after the first task");
+      return original(inputs);
+    };
+    await expect(bus.decidePlan(caller(owner), planId, "approve")).rejects.toThrow(/insert failed/);
+    store.insertTasks = original;
+    const stuck = await store.getPlan(planId);
+    const created = stuck?.items.filter((item) => item.taskId) ?? [];
+    const missing = stuck?.items.find((item) => !item.taskId);
+    const doneId = created.find((item) => item.assigneeName === "codex")?.taskId;
+    if (!stuck || created.length !== 2 || !doneId || !missing) throw new Error("stuck plan missing");
+    await store.updateTask(doneId, { status: "done", resultNote: "", resultLink: null });
+    const room = await store.getRoomByName("build");
+    const posted = await store.insertMessage({
+      threadId: stuck.roomId,
+      fromAgent: owner.id,
+      toAgent: null,
+      roomId: stuck.roomId,
+      body: `Approved the plan "${stuck.title}". Dispatched 1 task(s) to codex.`,
+      metadata: { kind: "plan_decision", planId: stuck.id },
+      hopCount: 0,
+      replyTo: null,
+    });
+    const retried = await bus.decidePlan(caller(owner), planId, "approve");
+    expect(retried.plan.items.every((item) => item.taskId)).toBe(true);
+    const notes = (
+      await store.listRoomMessages({ roomId: room?.id ?? "", since: null, limit: 30 })
+    ).filter((message) => message.metadata.kind === "plan_decision" && message.metadata.planId === planId);
+    expect(notes).toHaveLength(1);
+    expect(notes[0]?.id).toBe(posted.id);
+    expect((await store.listDeliveries(codex.id)).some((row) => row.event === "mention")).toBe(false);
+    for (const agent of [claude, grok]) {
+      const wakes = (await store.listDeliveries(agent.id)).filter((row) => row.event === "mention");
+      expect(wakes).toHaveLength(1);
+      expect(wakes[0]?.targetId).toBe(posted.id);
+    }
+    await expect(bus.decidePlan(caller(owner), planId, "approve")).rejects.toThrow(
+      /Cannot approve a plan that is executing/,
+    );
+    expect(
+      (await store.listRoomMessages({ roomId: room?.id ?? "", since: null, limit: 30 })).filter(
+        (message) => message.body.startsWith("Approved the plan"),
+      ),
+    ).toHaveLength(1);
   });
 
   it("pauses with a room message, requires members, and posts results only for the assignee", async () => {

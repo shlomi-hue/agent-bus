@@ -344,6 +344,7 @@ export interface Store {
   isRoomMember(roomId: string, agentId: string): Promise<boolean>;
   listRoomMembers(roomId: string): Promise<AgentSummary[]>;
   listRoomMessages(query: RoomLogQuery): Promise<Message[]>;
+  findPlanApproval(roomId: string, planId: string): Promise<Message | null>;
   listDirectMessages(query: DirectLogQuery): Promise<Message[]>;
   insertMessage(input: NewMessage): Promise<Message>;
   threadExists(threadId: string): Promise<boolean>;

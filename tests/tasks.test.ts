@@ -32,6 +32,12 @@ describe("mentions", () => {
     expect(mentionNames("email me at user@domain.test")).toEqual([]);
     expect(mentionNames("```\n@codex\n``` and `@claude` plus @grok")).toEqual(["grok"]);
   });
+
+  it("normalizes mixed-case mentions to the canonical lowercase name", () => {
+    expect(mentionNames("hey @Codex, @CLAUDE and @codex")).toEqual(["codex", "claude"]);
+    expect(mentionNames("email me at user@Domain.test")).toEqual([]);
+    expect(mentionNames("`@Codex` and @Grok")).toEqual(["grok"]);
+  });
 });
 
 describe("tasks", () => {
@@ -57,6 +63,22 @@ describe("tasks", () => {
 
     const listed = await callTool(bus, caller(codex), "list_my_tasks", {}, config);
     expect(listed.content[0]?.text).toContain("1 task(s)");
+  });
+
+  it("creates a task for a mixed-case mention of a lowercase agent", async () => {
+    const { store, config, bus, codex, owner, caller } = await fixture();
+    const sent = await callTool(
+      bus,
+      caller(owner),
+      "send_room_message",
+      { room: "general", body: "please @Codex look at the capitals" },
+      config,
+    );
+    expect(sent.isError).toBeUndefined();
+    const tasks = await store.listTasks({ assigneeId: codex.id });
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0]?.assigneeName).toBe("codex");
+    expect(tasks[0]?.title.toLowerCase()).not.toContain("@codex");
   });
 
   it("posts a status note, and skips that note when the room is paused", async () => {

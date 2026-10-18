@@ -682,33 +682,21 @@ export class AgentBus {
       }
     }
     const missing = current.items.filter((item) => !item.taskId);
-    const filled = await this.ensurePlanTasks(caller, current, missing);
+    await this.ensurePlanTasks(caller, current, missing);
     const finished = (await this.store.getPlan(current.id)) ?? current;
     const tasks = await this.tasksForPlan(finished);
-    if (!resumed) {
-      const names = [...new Set(finished.items.map((item) => item.assigneeName))];
-      const message = await this.insertRoom(
+    const names = [...new Set(finished.items.map((item) => item.assigneeName))];
+    const existing = resumed ? await this.store.findPlanApproval(current.roomId, current.id) : null;
+    const message =
+      existing ??
+      (await this.insertRoom(
         caller,
         current.roomId,
         `Approved the plan "${current.title}". Dispatched ${tasks.length} task(s) to ${names.join(", ")}.`,
         { kind: "plan_decision", planId: current.id },
-      );
-      await this.notify(message, tasks);
-    } else if (filled.length > 0) {
-      const seed = await this.store.getMessage(current.messageId);
-      if (seed) {
-        await this.notify(
-          {
-            ...seed,
-            fromAgent: caller.id,
-            fromName: caller.name,
-            fromIsHuman: caller.isHuman ?? true,
-            metadata: { kind: "plan_dispatch", planId: current.id },
-          },
-          filled,
-        );
-      }
-    }
+      ));
+    const wake = resumed ? tasks.filter((task) => task.status === "open") : tasks;
+    await this.notify(message, wake);
     return { plan: finished, tasks };
   }
 

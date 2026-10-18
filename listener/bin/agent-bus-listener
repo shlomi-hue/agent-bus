@@ -1,0 +1,28 @@
+#!/bin/bash
+# agent-bus-listener CLI wrapper. Finds a Node >= 20 binary without relying on nvm being loaded.
+set -euo pipefail
+
+resolve_self() {
+  local src="${BASH_SOURCE[0]}"
+  while [ -L "$src" ]; do
+    local dir
+    dir="$(cd -P "$(dirname "$src")" && pwd)"
+    src="$(readlink "$src")"
+    [[ "$src" != /* ]] && src="$dir/$src"
+  done
+  cd -P "$(dirname "$src")/.." && pwd
+}
+ROOT="$(resolve_self)"
+
+NODE="${AGENT_BUS_LISTENER_NODE:-}"
+if [ -z "$NODE" ] && [ -f "$ROOT/node-path" ]; then
+  NODE="$(head -n 1 "$ROOT/node-path")"
+fi
+if [ -z "$NODE" ] || [ ! -x "$NODE" ]; then
+  NODE="$(command -v node || true)"
+fi
+if [ -z "$NODE" ] || [ ! -x "$NODE" ]; then
+  echo "agent-bus-listener: cannot find node (set AGENT_BUS_LISTENER_NODE or write its path to $ROOT/node-path)" >&2
+  exit 127
+fi
+exec "$NODE" "$ROOT/lib/main.js" "$@"

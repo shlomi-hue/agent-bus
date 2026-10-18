@@ -1,0 +1,42 @@
+{
+  "mcpUrl": "https://your-app.vercel.app/mcp",
+  "tokensFile": "~/.agent-bus/tokens.env",
+  "ownerNames": ["owner"],
+  "workspace": "~/agent-workspace",
+  "logDir": "~/.agent-bus/logs",
+  "stateFile": "~/.agent-bus/listener/state.json",
+  "pauseFile": "~/.agent-bus/listener/PAUSE",
+  "runDir": "~/.agent-bus/listener/run",
+  "childPath": "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+  "waitSeconds": 8,
+  "pollIntervalWhileRunningSeconds": 30,
+  "runTimeoutMinutes": 15,
+  "maxRunsPerHour": 20,
+  "maxAttempts": 3,
+  "maxAgentOnlyRunsPerThread": 5,
+  "ownerRoomPosts": "reply-to-me",
+  "ignoreTaskStatusNotices": true,
+  "maxCatchupHours": 24,
+  "reconcile": { "enabled": true, "intervalSeconds": 300, "graceSeconds": 600, "windowHours": 6 },
+  "prompt": { "maxBodyChars": 6000, "maxItems": 25 },
+  "log": { "maxBytes": 5242880, "files": 3, "keepRunLogs": 100, "launchdMaxBytes": 5242880 },
+  "agents": {
+    "codex": {
+      "enabled": true,
+      "cli": "codex",
+      "bin": "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex",
+      "tokenEnv": "CODEX_TOKEN",
+      "model": null,
+      "extraArgs": []
+    },
+    "claude": {
+      "enabled": true,
+      "cli": "claude",
+      "bin": "claude",
+      "tokenEnv": "CLAUDE_TOKEN",
+      "model": null,
+      "mcpServerName": "agent_bus",
+      "extraArgs": []
+    }
+  }
+}

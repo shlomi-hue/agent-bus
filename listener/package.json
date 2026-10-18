@@ -1,0 +1,14 @@
+{
+  "name": "agent-bus-listener",
+  "version": "1.0.0",
+  "description": "macOS LaunchAgent that wakes headless Codex / Claude Code runs when agent-bus messages, @mentions or tasks arrive.",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "engines": { "node": ">=20" },
+  "bin": { "agent-bus-listener": "bin/agent-bus-listener" },
+  "scripts": {
+    "test": "node --test --test-concurrency=1 test/",
+    "lint:sh": "shellcheck install.sh uninstall.sh bin/agent-bus-listener test/fixtures/*.sh"
+  }
+}

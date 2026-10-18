@@ -19,6 +19,7 @@ import {
 import { icon } from "./icons.js";
 import { stripAnswers } from "./text.js";
 import { renderMarkdown } from "./markdown.js";
+import { applyMention, hintLabel, mentionHints, mentionQuery, suggestMentions } from "./mention-complete.js";
 
 type Presence = "available" | "busy" | "away";
 type Person = PersonLike & { id: string; presence: Presence; statusText: string; lastSeenAt: string | null };
@@ -143,6 +144,8 @@ export function boot(): void {
   const hookSecret = must<HTMLInputElement>("#hook-secret");
   const hooksEl = must<HTMLElement>("#hooks");
   const tabs = must<HTMLElement>("#tabs");
+  const mentionPop = must<HTMLElement>("#mention-pop");
+  const mentionHintsEl = must<HTMLElement>("#mention-hints");
 
   let state: State | null = null;
   let home: Home | null = null;
@@ -162,6 +165,10 @@ export function boot(): void {
   let source: EventSource | null = null;
   let hookAgent = "";
   let query = "";
+  let mentionOptions: string[] = [];
+  let mentionIndex = 0;
+  let mentionStart = -1;
+  let composing = false;
 
   function showError(text: string): void {
     banner.hidden = text === "";
@@ -201,8 +208,7 @@ export function boot(): void {
     renderWorking();
     renderPanel();
     renderTabs();
-    if (view !== "room" && window.matchMedia("(min-width: 768px)").matches) tasksPanel.hidden = true;
-    app.classList.toggle("with-panel", !tasksPanel.hidden && view === "room");
+    app.classList.toggle("with-panel", !tasksPanel.hidden);
     app.classList.toggle("show-rooms", view === "room" && window.matchMedia("(max-width: 767px)").matches && !current);
   }
 
@@ -290,7 +296,8 @@ export function boot(): void {
   function navItem(id: string, glyph: string, label: string, count: string, accent: boolean): HTMLButtonElement {
     const button = document.createElement("button");
     button.type = "button";
-    button.className = `sb-item${(id === "home" && view === "home") || (id === "activity" && view === "activity") ? " active" : ""}`;
+    const tasksOpen = id === "tasks-nav" && !tasksPanel.hidden;
+    button.className = `sb-item${(id === "home" && view === "home") || (id === "activity" && view === "activity") || tasksOpen ? " active" : ""}`;
     button.append(icon(glyph, 16));
     const text = document.createElement("span");
     text.className = "grow";
@@ -304,15 +311,13 @@ export function boot(): void {
     }
     button.addEventListener("click", () => {
       if (id === "tasks-nav") {
-        if (view !== "room") return;
-        tasksPanel.hidden = false;
-        render();
-        void loadTasks();
+        openTasks();
         return;
       }
       view = id === "activity" ? "activity" : "home";
       current = null;
       showComposer(false);
+      if (window.matchMedia("(min-width: 768px)").matches) tasksPanel.hidden = true;
       render();
     });
     return button;
@@ -397,9 +402,11 @@ export function boot(): void {
     tasksButton.title = "Tasks";
     tasksButton.append(icon("tasks", 16));
     tasksButton.addEventListener("click", () => {
-      tasksPanel.hidden = !tasksPanel.hidden;
-      if (!tasksPanel.hidden) void loadTasks();
-      render();
+      if (tasksPanel.hidden) openTasks();
+      else {
+        tasksPanel.hidden = true;
+        render();
+      }
     });
     header.append(topic, spacer, tasksButton);
   }
@@ -689,10 +696,7 @@ export function boot(): void {
         title.className = "t";
         title.textContent = task.title || task.status;
         chip.append(title, avatarEl(personByName(task.assigneeName), 16));
-        chip.addEventListener("click", () => {
-          tasksPanel.hidden = false;
-          void loadTasks();
-        });
+        chip.addEventListener("click", () => openTasks());
         list.append(chip);
       }
       main.append(list);
@@ -717,10 +721,7 @@ export function boot(): void {
           onApprove: () => void planAction(wire.plan!.id, "approve"),
           onSave: (tasks) => void savePlan(wire.plan!.id, tasks),
           onPause: () => void planAction(wire.plan!.id, wire.plan!.status === "paused" ? "resume" : "pause"),
-          onOpenTasks: () => {
-            tasksPanel.hidden = false;
-            void loadTasks();
-          },
+          onOpenTasks: () => openTasks(),
         }),
       );
     }
@@ -887,6 +888,12 @@ export function boot(): void {
     renderPanel();
     renderSidebar();
     renderWorking();
+  }
+
+  function openTasks(): void {
+    tasksPanel.hidden = false;
+    render();
+    void loadTasks().catch((error: unknown) => showError(error instanceof Error ? error.message : "Could not load tasks."));
   }
 
   async function refreshState(): Promise<void> {
@@ -1125,21 +1132,148 @@ export function boot(): void {
     if (event.key.toLowerCase() === "a" && items[selected]) void runAction(items[selected], "approve");
     if (event.key.toLowerCase() === "r" && items[selected]) void runAction(items[selected], "reply");
   });
+  function mentionCandidates(): { names: string[]; members: string[] | null } {
+    const owner = state?.owner.name ?? "";
+    const known = (state?.agents ?? []).map((agent) => agent.name).filter((name) => name !== owner);
+    if (current?.kind === "room") {
+      const room = state?.rooms.find((item) => item.name === current?.name);
+      const members = (room?.members ?? []).map((member) => member.name).filter((name) => name !== owner);
+      return { names: members, members };
+    }
+    return { names: known, members: null };
+  }
+
+  function closeMentions(): void {
+    mentionOptions = [];
+    mentionStart = -1;
+    mentionPop.hidden = true;
+    mentionPop.replaceChildren();
+    body.setAttribute("aria-expanded", "false");
+    body.removeAttribute("aria-activedescendant");
+  }
+
+  function renderMentionPop(): void {
+    mentionPop.replaceChildren();
+    mentionOptions.forEach((name, index) => {
+      const option = document.createElement("button");
+      option.type = "button";
+      option.id = `mention-opt-${index}`;
+      option.className = `mention-opt${index === mentionIndex ? " on" : ""}`;
+      option.setAttribute("role", "option");
+      option.setAttribute("aria-selected", index === mentionIndex ? "true" : "false");
+      const person = personByName(name);
+      const label = document.createElement("span");
+      label.className = "grow trunc";
+      label.textContent = name;
+      const presence = document.createElement("span");
+      presence.className = "faint";
+      presence.textContent = person.presence ?? "";
+      option.append(avatarEl(person, 20), label, presence);
+      // mousedown keeps focus in the textarea so the caret position survives.
+      option.addEventListener("mousedown", (event) => {
+        event.preventDefault();
+        pickMention(index);
+      });
+      mentionPop.append(option);
+    });
+    mentionPop.hidden = mentionOptions.length === 0;
+    body.setAttribute("aria-expanded", mentionPop.hidden ? "false" : "true");
+    if (mentionPop.hidden) body.removeAttribute("aria-activedescendant");
+    else body.setAttribute("aria-activedescendant", `mention-opt-${mentionIndex}`);
+  }
+
+  function updateMentions(): void {
+    const caret = body.selectionStart ?? body.value.length;
+    const found = body.selectionStart === body.selectionEnd ? mentionQuery(body.value, caret) : null;
+    if (!found) {
+      closeMentions();
+    } else {
+      const next = suggestMentions(found.query, mentionCandidates().names);
+      if (found.start !== mentionStart || next.join("\0") !== mentionOptions.join("\0")) mentionIndex = 0;
+      mentionStart = found.start;
+      mentionOptions = next;
+      renderMentionPop();
+    }
+    const { members } = mentionCandidates();
+    const known = (state?.agents ?? []).map((agent) => agent.name);
+    const active = found && mentionOptions.length > 0 ? found.query.toLowerCase() : "";
+    const hints = mentionHints(body.value, known, members).filter((hint) => hint.name !== active);
+    mentionHintsEl.replaceChildren();
+    for (const hint of hints) {
+      const chip = document.createElement("span");
+      chip.className = `mention-hint ${hint.status}`;
+      chip.textContent = hintLabel(hint);
+      mentionHintsEl.append(chip);
+    }
+    mentionHintsEl.hidden = hints.length === 0;
+  }
+
+  function pickMention(index: number): void {
+    const name = mentionOptions[index];
+    if (!name || mentionStart < 0) return;
+    const caret = body.selectionStart ?? body.value.length;
+    const next = applyMention(body.value, mentionStart, caret, name);
+    body.value = next.text;
+    body.setSelectionRange(next.caret, next.caret);
+    closeMentions();
+    body.focus();
+    body.dispatchEvent(new Event("input"));
+  }
+
   body.addEventListener("input", () => {
     body.style.height = "auto";
     body.style.height = `${Math.min(body.scrollHeight, 160)}px`;
     send.disabled = body.value.trim() === "";
     send.classList.toggle("ready", body.value.trim() !== "");
+    updateMentions();
+  });
+  body.addEventListener("click", () => updateMentions());
+  body.addEventListener("keyup", (event) => {
+    if (event.key === "ArrowLeft" || event.key === "ArrowRight" || event.key === "Home" || event.key === "End") updateMentions();
+  });
+  body.addEventListener("blur", () => closeMentions());
+  body.addEventListener("compositionstart", () => {
+    composing = true;
+  });
+  body.addEventListener("compositionend", () => {
+    composing = false;
+    updateMentions();
   });
   body.addEventListener("keydown", (event) => {
+    if (event.isComposing || composing || event.key === "Process") return;
+    if (!mentionPop.hidden && mentionOptions.length > 0) {
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        const step = event.key === "ArrowDown" ? 1 : -1;
+        mentionIndex = (mentionIndex + step + mentionOptions.length) % mentionOptions.length;
+        renderMentionPop();
+        return;
+      }
+      if ((event.key === "Enter" && !event.shiftKey) || event.key === "Tab") {
+        event.preventDefault();
+        pickMention(mentionIndex);
+        return;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeMentions();
+        return;
+      }
+    }
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
       composer.requestSubmit();
     }
   });
   must<HTMLButtonElement>("#insert-at").addEventListener("click", () => {
-    body.value = `${body.value}@`;
+    const start = body.selectionStart ?? body.value.length;
+    const end = body.selectionEnd ?? start;
+    const before = body.value.slice(0, start);
+    const prefix = before.length === 0 || /[^A-Za-z0-9_]$/.test(before) ? "@" : " @";
+    body.value = before + prefix + body.value.slice(end);
+    const caret = before.length + prefix.length;
     body.focus();
+    body.setSelectionRange(caret, caret);
     body.dispatchEvent(new Event("input"));
   });
   composer.addEventListener("submit", (event) => {
@@ -1154,6 +1288,9 @@ export function boot(): void {
     })
       .then(async (data) => {
         body.value = "";
+        closeMentions();
+        mentionHintsEl.replaceChildren();
+        mentionHintsEl.hidden = true;
         send.disabled = true;
         send.classList.remove("ready");
         if (!messages.some((message) => message.id === data.message.id)) messages.push(data.message);
@@ -1181,9 +1318,7 @@ export function boot(): void {
     if (!(button instanceof HTMLButtonElement)) return;
     const tab = button.dataset.tab;
     if (tab === "tasks") {
-      tasksPanel.hidden = false;
-      void loadTasks();
-      render();
+      openTasks();
       return;
     }
     if (tab === "rooms") {

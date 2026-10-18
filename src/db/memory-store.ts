@@ -667,6 +667,11 @@ export class MemoryStore implements Store {
     );
   }
 
+  async findPlanApproval(roomId: string, planId: string): Promise<Message | null> {
+    const message = this.messages.find((item) => item.roomId === roomId && isPlanApproval(item, planId));
+    return message ? cloneMessage(message) : null;
+  }
+
   async listDirectMessages(query: DirectLogQuery): Promise<Message[]> {
     return page(
       this.messages.filter(
@@ -771,6 +776,14 @@ function resultOrder(query: ResultQuery): RowOrder {
   if (query.order === "updated" || (query.limit && query.order !== "created")) return "updated-desc";
   if (query.order === "created" && query.limit) return "created-desc";
   return "created-asc";
+}
+
+function isPlanApproval(message: Message, planId: string): boolean {
+  return (
+    message.metadata.kind === "plan_decision" &&
+    message.metadata.planId === planId &&
+    message.body.startsWith("Approved the plan ")
+  );
 }
 
 function page(messages: Message[], since: string | null, limit: number): Message[] {
