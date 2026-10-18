@@ -8,7 +8,7 @@
   "engines": { "node": ">=20" },
   "bin": { "agent-bus-listener": "bin/agent-bus-listener" },
   "scripts": {
-    "test": "node --test --test-concurrency=1 test/",
+    "test": "node --test --test-concurrency=1 test/*.test.js",
     "lint:sh": "shellcheck install.sh uninstall.sh bin/agent-bus-listener test/fixtures/*.sh"
   }
 }
