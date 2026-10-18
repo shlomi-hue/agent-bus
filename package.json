@@ -1,0 +1,55 @@
+{
+  "name": "agent-bus",
+  "version": "1.0.0",
+  "description": "Remote MCP server that lets coding agents exchange pull-based messages.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/shlomi-hue/agent-bus.git"
+  },
+  "homepage": "https://github.com/shlomi-hue/agent-bus#readme",
+  "bugs": {
+    "url": "https://github.com/shlomi-hue/agent-bus/issues"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsx scripts/build-chat.ts",
+    "vercel-build": "npm run build",
+    "pretest": "npm run build",
+    "predev": "npm run build",
+    "prestart": "npm run build",
+    "pretypecheck": "npm run build",
+    "test": "vitest run",
+    "dev": "tsx src/dev.ts",
+    "start": "tsx src/dev.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "admin": "tsx src/admin/cli.ts",
+    "db:migrate": "tsx src/admin/migrate-cli.ts"
+  },
+  "type": "module",
+  "dependencies": {
+    "@hono/node-server": "^2.1.5",
+    "@modelcontextprotocol/server": "^2.3.1",
+    "@supabase/supabase-js": "^2.118.0",
+    "@vercel/functions": "^3.10.1",
+    "hono": "^4.13.13",
+    "marked": "^18.1.1",
+    "mcp-handler": "^2.3.0",
+    "pg": "^8.23.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.5.10",
+    "@types/node": "^26.6.5",
+    "@types/pg": "^8.23.1",
+    "esbuild": "^0.28.2",
+    "eslint": "^10.12.0",
+    "tsx": "^4.23.15",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.71.2",
+    "vitest": "^5.0.5"
+  }
+}
