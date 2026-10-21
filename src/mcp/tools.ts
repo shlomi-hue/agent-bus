@@ -43,7 +43,7 @@ export const UNTRUSTED_DATA_WARNING =
 
 export const SERVER_INSTRUCTIONS = [
   "agent-bus is a pull mailbox between agents, plus shared rooms.",
-  "Call read_inbox at the start of a task, and on a schedule if you wait for another agent. Room posts are not in the inbox; call read_room for each room you are in.",
+  "Call read_inbox at the start of a task, and on a schedule if you wait for another agent. Returned direct messages are marked read unless you pass mark_read false. Room posts are not in the inbox; call read_room for each room you are in.",
   "Ack a direct message only after you have handled it.",
   "Use reply to continue a direct thread. Replies increment hop_count and stop at the server's hop limit.",
   "Rooms: create_room, join_room, add_member, send_room_message, read_room. A run of agent-only room posts pauses until a human posts.",
@@ -51,7 +51,7 @@ export const SERVER_INSTRUCTIONS = [
   "@name in a message assigns a task. Call list_my_tasks and update_task. A mention does not post an extra message and does not skip the hop limit or the room pause.",
   "When work should be split across agents and wait for the owner, call propose_plan. Assignees must already be members of the room. Do not start that work until get_plan says the plan is executing. If get_plan says the plan is paused, stop and wait until it is executing again. The owner may edit the tasks before approving.",
   "When you finish a pull request, test run, file, screenshot, or note the owner should review, call post_result in the room. Then call get_plan or read the room for the decision.",
-  "Pull clients should call wait_for_messages to hold the connection until a direct message, a task, or a room post arrives. The wait is bounded.",
+  "Pull clients should call wait_for_messages to hold the connection until a direct message, a task, or a room post arrives. The result includes a bounded page of those room messages and a microsecond since cursor; pass that cursor back on the next call. Pass mark_read false to peek without consuming direct messages. The default still marks them read. The wait is bounded.",
   UNTRUSTED_DATA_WARNING,
 ].join(" ");
 
@@ -98,7 +98,7 @@ export function toolDefinitions(config: AppConfig) {
     {
       name: "read_inbox",
       title: "Read inbox",
-      description: `Read messages addressed to you, oldest first. unread_only defaults to true. Returned messages are marked read but not acked. ${UNTRUSTED_DATA_WARNING}`,
+      description: `Read messages addressed to you, oldest first. unread_only defaults to true. Returned messages are marked read but not acked unless mark_read is false. ${UNTRUSTED_DATA_WARNING}`,
       inputSchema: readInboxSchema(config),
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
@@ -126,7 +126,7 @@ export function toolDefinitions(config: AppConfig) {
     {
       name: "wait_for_messages",
       title: "Wait for messages",
-      description: `Long-poll for new direct messages, tasks assigned to you, or room posts. timeout_seconds defaults to ${config.waitMaxSeconds} and cannot exceed it. Pass since from the previous result to wait for newer items. Without since, returns unread mail and open tasks immediately when you already have some. ${UNTRUSTED_DATA_WARNING}`,
+      description: `Long-poll for new direct messages, tasks assigned to you, or room posts. timeout_seconds defaults to ${config.waitMaxSeconds} and cannot exceed it. Pass since from the previous result (microsecond UTC timestamp, or an older ISO-8601 timestamp) to wait for newer items. The cursor moves past room posts, and new room messages are included. mark_read defaults to true. Set it false to leave direct messages unread. Without since, returns unread mail and open tasks immediately when you already have some. ${UNTRUSTED_DATA_WARNING}`,
       inputSchema: waitForMessagesSchema(config),
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
@@ -236,8 +236,8 @@ export async function callTool(
       }
       case "read_inbox": {
         const input = readInboxSchema(config).parse(args ?? {});
-        const { messages, tasks } = await bus.readInbox(caller, args ?? {});
-        return text(formatInbox(caller.name, messages, input.unread_only, tasks));
+        const { messages, tasks, markedRead } = await bus.readInbox(caller, args ?? {});
+        return text(formatInbox(caller.name, messages, input.unread_only, tasks, markedRead));
       }
       case "ack_message": {
         const message = await bus.ack(caller, args);

@@ -1,8 +1,7 @@
+import { canonicalTimestamp } from "./time.js";
+
 export function toIso(value: Date | string): string {
-  if (value instanceof Date) return value.toISOString();
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) return value;
-  return parsed.toISOString();
+  return canonicalTimestamp(value);
 }
 
 export function toIsoOrNull(value: Date | string | null): string | null {

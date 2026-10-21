@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { BusError } from "../errors.js";
 import type { PresenceStatus } from "./presence.js";
+import { isAfter, isAtOrAfter } from "./time.js";
 import type {
   Agent,
   AgentSummary,
@@ -227,7 +228,7 @@ export class MemoryStore implements Store {
       .filter((task) => !query.roomId || task.roomId === query.roomId)
       .filter((task) => !query.roomIds || (task.roomId !== null && query.roomIds.includes(task.roomId)))
       .filter((task) => !query.messageIds || query.messageIds.includes(task.sourceMessageId))
-      .filter((task) => !query.updatedAfter || task.updatedAt > query.updatedAfter)
+      .filter((task) => !query.updatedAfter || isAfter(task.updatedAt, query.updatedAfter))
       .sort((a, b) => compareRows(a, b, taskOrder(query)));
     return (query.limit ? rows.slice(0, query.limit) : rows).map((task) => ({ ...task }));
   }
@@ -650,7 +651,7 @@ export class MemoryStore implements Store {
     return this.messages
       .filter((message) => message.roomId === null && message.toAgent === query.toAgent)
       .filter((message) => !query.unreadOnly || message.readAt === null)
-      .filter((message) => !query.since || message.createdAt >= query.since)
+      .filter((message) => !query.since || isAtOrAfter(message.createdAt, query.since))
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id))
       .slice(0, query.limit)
       .map(cloneMessage);
@@ -660,7 +661,7 @@ export class MemoryStore implements Store {
     return page(
       this.messages.filter(
         (message) =>
-          message.roomId === query.roomId && (!query.since || message.createdAt > query.since),
+          message.roomId === query.roomId && (!query.since || isAfter(message.createdAt, query.since)),
       ),
       query.since,
       query.limit,
@@ -679,7 +680,7 @@ export class MemoryStore implements Store {
           message.roomId === null &&
           ((message.fromAgent === query.agentId && message.toAgent === query.otherId) ||
             (message.fromAgent === query.otherId && message.toAgent === query.agentId)) &&
-          (!query.since || message.createdAt > query.since),
+          (!query.since || isAfter(message.createdAt, query.since)),
       ),
       query.since,
       query.limit,

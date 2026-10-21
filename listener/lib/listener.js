@@ -144,9 +144,9 @@ export class AgentLoop {
   }
 
   /**
-   * Stop. An in-flight wait_for_messages is allowed to finish (up to graceMs) because the server marks
-   * returned direct messages read even if we never receive the response; finishing it lets us persist
-   * those triggers to the queue for the next start instead of losing them.
+   * Stop. An in-flight wait_for_messages is allowed to finish (up to graceMs). Older servers mark
+   * returned direct messages read even if the response is lost; finishing the call lets us persist
+   * those triggers. A server that honors mark_read false does not consume them.
    */
   async stop({ graceMs = (this.cfg.waitSeconds + 5) * 1000 } = {}) {
     if (this.stopping) return;
@@ -200,40 +200,66 @@ export class AgentLoop {
 
   /**
    * One wait_for_messages long-poll. Returns {immediate, newTriggers}.
-   * NOTE: wait_for_messages marks returned direct messages read (not acked) on the server, so every DM it
-   * returns is either queued here (with full content for the prompt) or logged as skipped.
+   * Asks the server not to mark direct messages read. Older servers ignore mark_read and still consume
+   * them; the response text says so, and every DM is queued here or logged as skipped.
    */
   async pollOnce() {
     const started = Date.now();
     const since = this.st.cursor;
     const text = await this.client.callTool(
       "wait_for_messages",
-      { since, timeout_seconds: this.cfg.waitSeconds },
+      { since, timeout_seconds: this.cfg.waitSeconds, mark_read: false },
       { timeoutMs: (this.cfg.waitSeconds + 25) * 1000, signal: this.netAbort.signal },
     );
     const wake = parseWait(text);
     this.st.lastPollAt = new Date().toISOString();
     const stamps = [];
     let added = 0;
+    const precise = typeof wake.cursor === "string" && /\.\d{6}Z$/.test(wake.cursor);
 
     const dmThreadBySourceId = new Map();
     for (const m of wake.messages) {
       stamps.push(m.createdAt);
       dmThreadBySourceId.set(m.id, m.threadId);
-      added += this.consider(`dm:${m.id}`, () => evaluateDm(m, this.ctx()), m);
+      added += this.consider(`dm:${m.id}`, () => {
+        const res = evaluateDm(m, this.ctx());
+        if (res.trigger) res.trigger.markedRead = wake.markedRead;
+        return res;
+      }, m);
     }
 
     for (const t of wake.tasks) {
+      if (t.updatedAt) stamps.push(t.updatedAt);
       const prev = this.st.taskStatus[t.id];
       const res = evaluateTask(t, prev, this.ctx(), { dmThreadBySourceId });
+      if (res.trigger) {
+        if (t.threadId) res.trigger.threadId = t.threadId;
+        if (t.updatedAt) res.trigger.createdAt = t.updatedAt;
+      }
       this.st.taskStatus[t.id] = t.status;
       if (res.trigger) added += this.enqueue(res.trigger);
       else this.log.debug(`task ${t.id} skipped: ${res.skip}`);
     }
 
-    for (const room of wake.rooms) {
-      const roomSince = this.st.roomCursors[room] ? isoPlusMs(this.st.roomCursors[room], 1) : since;
-      const msgs = await this.readRoomSince(room, roomSince);
+    const inlineByRoom = new Map();
+    for (const message of wake.roomMessages) {
+      const list = inlineByRoom.get(message.room) ?? [];
+      list.push(message);
+      inlineByRoom.set(message.room, list);
+    }
+    const roomNames = wake.roomMessagesInline
+      ? [...new Set([...wake.rooms, ...inlineByRoom.keys()])]
+      : wake.rooms;
+    for (const room of roomNames) {
+      let msgs = inlineByRoom.get(room) ?? [];
+      const needRead = !wake.roomMessagesInline || wake.truncatedRooms.includes(room) || (wake.rooms.includes(room) && msgs.length === 0);
+      if (needRead) {
+        const roomSince = msgs.at(-1)?.createdAt
+          ?? (this.st.roomCursors[room] ? (precise ? this.st.roomCursors[room] : isoPlusMs(this.st.roomCursors[room], 1)) : since);
+        const extra = await this.readRoomSince(room, roomSince, { exact: precise });
+        const seen = new Set(msgs.map((message) => message.id));
+        msgs = [...msgs, ...extra.filter((message) => !seen.has(message.id))];
+      }
       const fresh = msgs.filter((m) => !this.st.seen[`room:${m.id}`]);
       const res = evaluateRoomMessages(room, fresh, this.ctx(), this.st.lastAgentSpeaker[room] ?? null);
       this.st.lastAgentSpeaker[room] = res.lastAgentSpeaker;
@@ -247,16 +273,20 @@ export class AgentLoop {
       }
     }
 
-    // Advance our own cursor. Server timestamps are truncated to milliseconds while the DB keeps
-    // microseconds, so +1 ms avoids re-reading the newest item forever.
-    const next = maxIso(since, wake.cursor, ...stamps);
-    if (next && Date.parse(next) > Date.parse(since)) this.st.cursor = isoPlusMs(next, 1);
+    // A precise inline cursor already includes room posts at full resolution. Older servers truncate
+    // to milliseconds and omit room timestamps, so keep the +1 ms workaround there.
+    if (wake.roomMessagesInline && precise) {
+      this.st.cursor = wake.cursor;
+    } else {
+      const next = maxIso(since, wake.cursor, ...stamps);
+      if (next && Date.parse(next) > Date.parse(since)) this.st.cursor = isoPlusMs(next, 1);
+    }
     if (added > 0) this.workWaker.wake();
     this.persist();
     return { immediate: Date.now() - started < 1000 && !wake.timedOut, newTriggers: added, wake };
   }
 
-  async readRoomSince(room, since) {
+  async readRoomSince(room, since, { exact = false } = {}) {
     const all = [];
     let cursor = since;
     for (let page = 0; page < 5; page++) {
@@ -264,7 +294,8 @@ export class AgentLoop {
       const msgs = parseRoomLog(text);
       all.push(...msgs);
       if (msgs.length < 100) break;
-      cursor = isoPlusMs(maxIso(...msgs.map((m) => m.createdAt)), 1);
+      const last = maxIso(...msgs.map((m) => m.createdAt));
+      cursor = exact && typeof last === "string" && /\.\d{6}Z$/.test(last) ? last : isoPlusMs(last, 1);
     }
     return all;
   }
@@ -305,7 +336,7 @@ export class AgentLoop {
     this.st.lastReconcileAt = new Date().toISOString();
     const floor = maxIso(this.st.baselineAt, new Date(Date.now() - rc.windowHours * 3600_000).toISOString());
     try {
-      const text = await this.client.callTool("read_inbox", { unread_only: false, since: floor, limit: 100 }, { timeoutMs: 20_000, signal: this.netAbort.signal });
+      const text = await this.client.callTool("read_inbox", { unread_only: false, since: floor, limit: 100, mark_read: false }, { timeoutMs: 20_000, signal: this.netAbort.signal });
       let added = 0;
       for (const m of parseInbox(text)) {
         if (m.acked || this.st.seen[`dm:${m.id}`]) continue;

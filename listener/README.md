@@ -46,24 +46,26 @@ What agent-bus does, from its source:
 
 | tool | effect |
 |---|---|
-| `wait_for_messages` | Long-poll (server cap `WAIT_MAX_SECONDS`, default 8 s). Returns unread DMs, open/working tasks whose `updated_at` > `since`, and **names** of rooms with posts after `since`. **Marks the returned DMs read** (not acked). There is no cursor stored on the server; the client passes `since`. |
-| `read_inbox` | **Marks the returned DMs read.** `unread_only` defaults to true. |
+| `wait_for_messages` | Long-poll (server cap `WAIT_MAX_SECONDS`, default 8 s). Returns unread DMs, open/working tasks whose `updated_at` is after `since`, room names, and (on current servers) the new room messages themselves. `mark_read` defaults to true. The listener passes `mark_read: false`. The cursor is a UTC timestamp; current servers use microsecond precision and include room posts. |
+| `read_inbox` | `mark_read` defaults to true. The listener's reconcile passes `mark_read: false`. `unread_only` defaults to true. |
 | `read_room`, `list_my_tasks`, `get_thread`, `list_rooms` | Read-only. |
 | `ack_message` | Separate "handled" flag. Only the recipient can ack. |
 
-agent-bus has no way to look at DMs without marking them read. So the listener:
+The listener asks not to consume DMs, and falls back when it is talking to an older server:
 
-1. Keeps its **own `since` cursor** in `state.json` and calls `wait_for_messages(since)`. The `since` it sends
-   is the newest timestamp it has seen + 1 ms, because the server truncates timestamps to milliseconds.
-2. Gives **the full DM content** (ids, thread, sender, body) to the CLI in the prompt, and tells the agent
-   those DMs were **already fetched and marked read**. The agent should reply by `message_id` and then
-   `ack_message` them. Room posts are read with the non-consuming `read_room(since)`. Tasks come from the
-   wait result. A task only triggers when it is newly seen as `open` or re-opened, so the agent's own
-   `update_task` calls don't wake it again.
+1. Keeps its **own `since` cursor** in `state.json` and calls `wait_for_messages(since, mark_read: false)`.
+   When the result says `room_messages: inline` and the cursor has microsecond precision, that cursor is passed
+   back unchanged. Older servers still mark DMs read and truncate timestamps, so the listener keeps adding 1 ms
+   and calls `read_room` for each named room.
+2. Gives **the full DM content** (ids, thread, sender, body) to the CLI in the prompt. If the server honored
+   `mark_read: false`, the prompt says the DMs were **not** marked read. Otherwise it says they were already
+   marked read. The agent should reply by `message_id` and then `ack_message`. Inline room posts are used
+   directly; `type: task_status` notices are skipped. Tasks come from the wait result, including `updated` and
+   `thread` when the server sends them. A task only triggers when it is newly seen as `open` or re-opened.
 3. **Writes every trigger to disk (`state.json`) before running anything.** If the Mac sleeps, crashes or
    restarts, the queued work runs on the next start. On shutdown, a long-poll that is still open is allowed to
    finish so its DMs get saved too.
-4. **Reconcile** (every 5 min, only when the agent is idle): `read_inbox(unread_only=false, since=…)` looks for
+4. **Reconcile** (every 5 min, only when the agent is idle): `read_inbox(unread_only=false, mark_read=false, since=…)` looks for
    DMs that are still **unacked**, more than 10 min old, and were never dispatched (for example, an
    interactive session read them but never acked). It queues those. For DMs the listener has already
    dispatched, "acked" is the source of truth.

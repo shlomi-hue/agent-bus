@@ -45,8 +45,8 @@ Tools:
 | --- | --- |
 | `list_agents` | Active agents (id, name, description). |
 | `send_message` | New thread, hop 0, addressed by agent name. |
-| `read_inbox` | Messages addressed to the caller, oldest first. `unread_only` defaults to true. Returned rows are marked read, not acked. Open and working tasks are listed above the messages. |
-| `wait_for_messages` | Long-poll until a direct message, an open task, or a room post arrives, or until `WAIT_MAX_SECONDS`. Pass `since` from the previous result. |
+| `read_inbox` | Messages addressed to the caller, oldest first. `unread_only` defaults to true. Returned rows are marked read, not acked, unless `mark_read` is false. Open and working tasks are listed above the messages. |
+| `wait_for_messages` | Long-poll until a direct message, an open task, or a room post arrives, or until `WAIT_MAX_SECONDS`. Pass `since` from the previous result. `mark_read` defaults to true. The result includes a bounded page of the new room messages. |
 | `ack_message` | Recipient marks a message handled. |
 | `reply` | Same thread, recipient becomes the original sender, `hop_count` increments. |
 | `get_thread` | Full thread, only if the caller is a participant. Room threads require membership. |
@@ -362,7 +362,7 @@ Headers:
 
 Delivery is a row in `webhook_deliveries`. The request tries immediately (up to three passes, with a short pause between them) and uses `@vercel/functions` `waitUntil` so Hobby can finish after the HTTP response. The daily cron calls the same dispatcher for anything still due. A claim increments `attempts`. While attempts are under 3 the next try is immediate. After that the delay is `min(60s * attempts, 1h)`, and the row is `failed` after 6 attempts. Failures are stored as `last_error` and never thrown back to the message write.
 
-`wait_for_messages` is the pull-side counterpart. It spends one rate-limit slot, then holds the function until mail arrives or `timeout_seconds` (default and max `WAIT_MAX_SECONDS`, default 8) elapses. Without `since`, unread direct messages and open or working tasks return immediately. With `since`, it polls about every 200ms for newer direct messages, task updates, or room posts in rooms the caller belongs to. Room hits return room names, not bodies, and do not mark the room read. On timeout, call it again with the returned `since` cursor.
+`wait_for_messages` is the pull-side counterpart. It spends one rate-limit slot, then holds the function until mail arrives or `timeout_seconds` (default and max `WAIT_MAX_SECONDS`, default 8) elapses. Without `since`, unread direct messages and open or working tasks return immediately. With `since`, it polls about every 200ms for newer direct messages, task updates, or room posts in rooms the caller belongs to. A room hit includes the room name and a bounded page of those posts (sender, human or agent, thread id, and `created_at`). Room posts are not marked read. Direct messages are marked read unless `mark_read` is false. The `since` cursor is a UTC timestamp with microsecond precision. Pass that exact value back. Older ISO-8601 timestamps are still accepted. The cursor also moves past room posts and task updates. On timeout, call it again with the returned cursor. Automatic task-status notes are typed `task_status`, and each task line includes `updated` and `thread`.
 
 ## Mac listener (optional)
 

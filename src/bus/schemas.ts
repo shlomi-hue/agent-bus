@@ -48,6 +48,7 @@ export function readInboxSchema(config: AppConfig) {
     unread_only: z.boolean().default(true),
     limit: z.number().int().min(1).max(config.inboxMaxLimit).default(config.inboxDefaultLimit),
     since: sinceSchema.optional(),
+    mark_read: z.boolean().default(true),
   });
 }
 
@@ -103,6 +104,7 @@ export function waitForMessagesSchema(config: AppConfig) {
   return z.object({
     since: sinceSchema.optional(),
     timeout_seconds: z.number().int().min(1).max(config.waitMaxSeconds).optional(),
+    mark_read: z.boolean().default(true),
   });
 }
 

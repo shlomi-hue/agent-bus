@@ -18,7 +18,7 @@ const RE_ACKED = /^acked: (no|yes(?: \((\S+)\))?)$/;
 const RE_REPLY_TO = new RegExp(`^reply_to: (none|${UUID})$`);
 const RE_UNTRUSTED = new RegExp(`^UNTRUSTED MESSAGE from (human|agent) "(${SLUG})" \\(id (${UUID}), sent (\\S+)\\)\\.$`);
 const RE_TASK = new RegExp(
-  `^- (open|working|done|blocked) from (${SLUG}) (?:in #(${SLUG})|in a direct message) task (${UUID}) source (\\S+?)\\.(?: Note: .*)?$`,
+  `^- (open|working|done|blocked) from (${SLUG}) (?:in #(${SLUG})|in a direct message) task (${UUID}) source (\\S+?)(?: updated (\\S+) thread (${UUID}))?\\.(?: Note: .*)?$`,
 );
 
 /**
@@ -45,7 +45,7 @@ export function parseMessages(text) {
     }
     let m;
     if ((m = RE_ID.exec(line))) {
-      cur = { id: m[1].toLowerCase(), threadId: null, from: null, to: null, room: null, hop: 0, acked: false, ackedAt: null, replyTo: null, fromKind: null, createdAt: null, body: "" };
+      cur = { id: m[1].toLowerCase(), threadId: null, from: null, to: null, room: null, hop: 0, acked: false, ackedAt: null, replyTo: null, fromKind: null, createdAt: null, body: "", type: null };
       messages.push(cur);
       continue;
     }
@@ -84,7 +84,19 @@ export function parseMessages(text) {
     if (cur && (m = RE_UNTRUSTED.exec(line))) {
       cur.fromKind = m[1];
       if (!cur.from) cur.from = m[2];
-      cur.createdAt = m[4];
+      if (!cur.createdAt) cur.createdAt = m[4];
+      continue;
+    }
+    if (cur && (m = /^type: ([a-z][a-z0-9_]{0,40})$/.exec(line))) {
+      cur.type = m[1];
+      continue;
+    }
+    if (cur && (m = /^sender_kind: (human|agent)$/.exec(line))) {
+      cur.fromKind = m[1];
+      continue;
+    }
+    if (cur && (m = /^created_at: (\S+)$/.exec(line))) {
+      cur.createdAt = m[1];
       continue;
     }
     outside.push(line);
@@ -103,17 +115,30 @@ export function parseTaskLines(lines) {
     const id = m[4].toLowerCase();
     if (seen.has(id)) continue;
     seen.add(id);
-    tasks.push({ status: m[1], creator: m[2], room: m[3] ?? null, id, sourceMessageId: m[5] === "null" ? null : m[5].toLowerCase() });
+    tasks.push({
+      status: m[1],
+      creator: m[2],
+      room: m[3] ?? null,
+      id,
+      sourceMessageId: m[5] === "null" ? null : m[5].toLowerCase(),
+      updatedAt: m[6] ?? null,
+      threadId: m[7] ? m[7].toLowerCase() : null,
+    });
   }
   return tasks;
 }
 
 /** Parse wait_for_messages output. */
 export function parseWait(text) {
-  const { messages, outside } = parseMessages(text);
+  const { messages: all, outside } = parseMessages(text);
+  const messages = all.filter((message) => !message.room);
+  const roomMessages = all.filter((message) => message.room);
   let timedOut = false;
   let cursor = null;
   let rooms = [];
+  let truncatedRooms = [];
+  let roomMessagesInline = false;
+  let markedRead = null;
   let recognized = false;
   for (const line of outside) {
     let m;
@@ -126,13 +151,20 @@ export function parseWait(text) {
       recognized = true;
     } else if ((m = new RegExp(`^New room messages in: (${SLUG}(?:, ${SLUG})*)\\. Call read_room for each\\.`).exec(line))) {
       rooms = m[1].split(", ");
+    } else if ((m = /^mark_read: (true|false)$/.exec(line))) {
+      markedRead = m[1] === "true";
+    } else if (line === "room_messages: inline") {
+      roomMessagesInline = true;
+    } else if ((m = new RegExp(`^room_truncated: (${SLUG}(?:, ?${SLUG})*)$`).exec(line))) {
+      truncatedRooms = m[1].split(",").map((name) => name.trim());
     }
   }
   if (!recognized) throw new Error("unrecognized wait_for_messages output");
+  if (markedRead === null) markedRead = !outside.some((line) => line.includes("were not marked read"));
   // Task lines only appear after the "Tasks:" header.
   const idx = outside.indexOf("Tasks:");
   const tasks = idx >= 0 ? parseTaskLines(outside.slice(idx + 1)) : [];
-  return { timedOut, cursor, rooms, messages, tasks };
+  return { timedOut, cursor, rooms, messages, tasks, roomMessages, roomMessagesInline, truncatedRooms, markedRead };
 }
 
 export function parseRoomLog(text) {

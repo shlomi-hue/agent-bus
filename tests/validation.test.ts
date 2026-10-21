@@ -1,12 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { ZodError } from "zod";
 import { loadConfig } from "../src/config.js";
-import { readInboxSchema, sendMessageSchema } from "../src/bus/schemas.js";
+import { readInboxSchema, sendMessageSchema, waitForMessagesSchema } from "../src/bus/schemas.js";
 
 const config = loadConfig({});
 
 describe("validation", () => {
   it("uses the documented defaults", () => {
+    expect(config.ownerName).toBe("owner");
+    expect(loadConfig({ OWNER_NAME: "ada" }).ownerName).toBe("ada");
     expect(config.maxHops).toBe(10);
     expect(config.maxBodyBytes).toBe(16_384);
     expect(config.rateLimitMax).toBe(30);
@@ -35,6 +37,12 @@ describe("validation", () => {
 
     const inbox = readInboxSchema(config);
     expect(inbox.parse({}).unread_only).toBe(true);
+    expect(inbox.parse({}).mark_read).toBe(true);
+    expect(inbox.parse({ mark_read: false }).mark_read).toBe(false);
+    expect(waitForMessagesSchema(config).parse({}).mark_read).toBe(true);
+    expect(waitForMessagesSchema(config).parse({ since: "2026-10-18T09:00:01.123456Z" }).since).toBe(
+      "2026-10-18T09:00:01.123456Z",
+    );
     expect(inbox.parse({}).limit).toBe(20);
     expect(() => inbox.parse({ limit: 500 })).toThrow(ZodError);
     expect(() => inbox.parse({ since: "yesterday" })).toThrow(/ISO-8601/);

@@ -30,6 +30,14 @@ test("agent task-status notices for working/open are ignored, done triggers", ()
   assert.ok(evaluateDm(msg("claude", { body: "claude set the task for claude to done. Note: merged" }), ctx).trigger);
 });
 
+test("typed task_status room notices are skipped", () => {
+  const notice = post("claude", "claude set the task for codex to working. Note: @codex");
+  notice.type = "task_status";
+  const r = evaluateRoomMessages("general", [notice], ctx);
+  assert.equal(r.triggers.length, 0);
+  assert.match(r.skipped[0].reason, /task status/);
+});
+
 test("agent room chatter without @mention never triggers (loop guard)", () => {
   const r = evaluateRoomMessages("general", [post("claude", "I think we should refactor"), post("grok", "agreed")], ctx);
   assert.equal(r.triggers.length, 0);

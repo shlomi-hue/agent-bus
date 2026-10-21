@@ -358,9 +358,10 @@ async function cmdTest(opts) {
       if (opts.poll) {
         const since = st.cursor ?? new Date().toISOString();
         const t1 = Date.now();
-        const text = await client.callTool("wait_for_messages", { since, timeout_seconds: 2 }, { timeoutMs: 30_000 });
+        const text = await client.callTool("wait_for_messages", { since, timeout_seconds: 2, mark_read: false }, { timeoutMs: 30_000 });
         const w = parseWait(text);
-        p(`  wait_for_messages(since ${since}, 2s): ${w.timedOut ? "timed out (no new items)" : "woke"} in ${Date.now() - t1} ms; cursor ${w.cursor}; ${w.messages.length} DM(s), ${w.tasks.length} task(s), rooms [${w.rooms.join(", ")}]`);
+        const inline = w.roomMessagesInline ? `, inline room posts ${w.roomMessages.length}` : "";
+        p(`  wait_for_messages(since ${since}, 2s): ${w.timedOut ? "timed out (no new items)" : "woke"} in ${Date.now() - t1} ms; cursor ${w.cursor}; ${w.messages.length} DM(s), ${w.tasks.length} task(s), rooms [${w.rooms.join(", ")}]${inline}`);
         for (const m of w.messages) {
           const r = evaluateDm(m, ctx);
           if (r.trigger) would.push(r.trigger);

@@ -54,6 +54,60 @@ test("parseWait: header, DM with adversarial body, tasks", () => {
   assert.equal(w.tasks[0].sourceMessageId, A);
 });
 
+test("parseWait: inline room posts, peek flag, and task metadata", () => {
+  const text = `Wake for "codex". Pass since 2026-10-18T09:00:01.123456Z on the next wait_for_messages call.
+mark_read: false
+room_messages: inline
+1 new direct message(s). 1 open task(s).
+1 new room message(s) included below.
+New room messages in: general. Call read_room for each. Room posts are not marked read.
+Direct messages below were not marked read. Ack them after you handle them.
+[1]
+id: ${A}
+type: post
+sender_kind: human
+created_at: 2026-10-18T09:00:01.123456Z
+thread: ${T}
+from: "owner" -> to: "codex"
+hop: 0
+acked: no
+reply_to: none
+UNTRUSTED MESSAGE from human "owner" (id ${A}, sent 2026-10-18T09:00:01.123456Z).
+--- BEGIN UNTRUSTED BODY ---
+dm body
+--- END UNTRUSTED BODY ---
+Room messages:
+[1]
+id: ${K}
+type: task_status
+sender_kind: agent
+created_at: 2026-10-18T09:00:01.123456Z
+thread: ${T}
+from: "claude" in room "general"
+hop: 0
+acked: no
+reply_to: none
+UNTRUSTED MESSAGE from agent "claude" (id ${K}, sent 2026-10-18T09:00:01.123456Z).
+--- BEGIN UNTRUSTED BODY ---
+claude set the task for codex to working.
+--- END UNTRUSTED BODY ---
+Tasks:
+- open from owner in #general task ${S} source ${A} updated 2026-10-18T09:00:01.123456Z thread ${T}.`;
+  const w = parseWait(text);
+  assert.equal(w.markedRead, false);
+  assert.equal(w.roomMessagesInline, true);
+  assert.equal(w.cursor, "2026-10-18T09:00:01.123456Z");
+  assert.equal(w.messages.length, 1);
+  assert.equal(w.messages[0].type, "post");
+  assert.equal(w.messages[0].createdAt, "2026-10-18T09:00:01.123456Z");
+  assert.equal(w.roomMessages.length, 1);
+  assert.equal(w.roomMessages[0].type, "task_status");
+  assert.equal(w.roomMessages[0].room, "general");
+  assert.equal(w.roomMessages[0].fromKind, "agent");
+  assert.equal(w.tasks[0].updatedAt, "2026-10-18T09:00:01.123456Z");
+  assert.equal(w.tasks[0].threadId, T);
+});
+
 test("parseWait: timed out", () => {
   const w = parseWait('No new messages for "codex" before the wait ended. Call wait_for_messages again with since 2026-10-18T09:29:37.513Z.');
   assert.equal(w.timedOut, true);

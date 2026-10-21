@@ -39,6 +39,12 @@ import type {
 } from "./types.js";
 import { asMetadata, one, toIso, toIsoOrNull } from "./values.js";
 
+// node-pg's default parser turns timestamptz into a Date and drops microseconds.
+// Keep the raw text so a cursor can round-trip the stored instant.
+const preserveTimestamp = (value: string): string => value;
+pg.types.setTypeParser(pg.types.builtins.TIMESTAMP, preserveTimestamp);
+pg.types.setTypeParser(pg.types.builtins.TIMESTAMPTZ, preserveTimestamp);
+
 const MESSAGE_SELECT = `
   select
     m.id,

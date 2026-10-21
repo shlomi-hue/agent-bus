@@ -22,6 +22,11 @@ export function isOwner(name, ctx) {
   return ctx.ownerNames.includes(name);
 }
 
+function skippableTaskNotice(msg) {
+  const notice = taskStatusNotice(msg.body);
+  return Boolean(notice && (notice.status === "working" || notice.status === "open"));
+}
+
 /** @returns {{trigger?: object, skip?: string}} */
 export function evaluateDm(msg, ctx) {
   if (msg.from === ctx.self) return { skip: "own message" };
@@ -30,8 +35,8 @@ export function evaluateDm(msg, ctx) {
   const owner = isOwner(msg.from, ctx);
   if (!owner && ctx.ignoreTaskStatusNotices) {
     const notice = taskStatusNotice(msg.body);
-    if (notice && notice.actor === msg.from && (notice.status === "working" || notice.status === "open")) {
-      return { skip: `task status notice (${notice.status}) from agent ${msg.from}` };
+    if (msg.type === "task_status" || (notice && notice.actor === msg.from && (notice.status === "working" || notice.status === "open"))) {
+      return { skip: `task status notice (${notice?.status ?? msg.type}) from agent ${msg.from}` };
     }
   }
   return {
@@ -79,6 +84,8 @@ export function evaluateRoomMessages(room, messages, ctx, lastAgentSpeaker = nul
     };
     if (msg.from === ctx.self) {
       skipped.push({ id: msg.id, reason: "own message" });
+    } else if (!owner && ctx.ignoreTaskStatusNotices && (msg.type === "task_status" || skippableTaskNotice(msg))) {
+      skipped.push({ id: msg.id, reason: `task status notice from agent ${msg.from}` });
     } else {
       const mentioned = mentionNames(msg.body).includes(ctx.self);
       if (mentioned) {
@@ -115,7 +122,7 @@ export function evaluateTask(task, prevStatus, ctx, { dmThreadBySourceId = new M
       kind: "task",
       key,
       id: task.id,
-      threadId: null,
+      threadId: task.threadId ?? null,
       room: task.room,
       from: task.creator,
       fromOwner: owner,

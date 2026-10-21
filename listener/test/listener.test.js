@@ -8,9 +8,9 @@ import { Logger } from "../lib/logger.js";
 import { MockAgentBus } from "./fixtures/mock-agent-bus.js";
 import { testConfig, tmpdir, waitFor, readArgvLog, memLog } from "./helpers.js";
 
-async function setup(t, { agent = "codex", cfg: over = {}, env = {}, seed } = {}) {
+async function setup(t, { agent = "codex", cfg: over = {}, env = {}, seed, protocol = 1 } = {}) {
   const dir = tmpdir();
-  const bus = new MockAgentBus();
+  const bus = new MockAgentBus({ protocol });
   const url = await bus.listen();
   const cfg = testConfig(dir, { mcpUrl: url, ...over });
   const argvLog = path.join(dir, "argv.log");
@@ -196,6 +196,23 @@ test("first start does not consume the existing backlog; restart resumes from cu
   await waitFor(() => readArgvLog(process.env.FAKE_LOG).length === 1, { label: "catch-up run" });
   assert.ok(missed.readAt);
   assert.equal(old.readAt, null);
+});
+
+test("protocol 2 peeks without consuming and uses inline room posts", async (t) => {
+  const { bus, runs, stdins } = await setup(t, { protocol: 2 });
+  const dm = bus.dm("owner", "codex", "peek me");
+  await waitFor(() => runs().length === 1, { label: "dm run" });
+  assert.equal(dm.readAt, null, "mark_read false leaves the DM unread");
+  assert.match(stdins()[0], /NOT marked read/);
+  assert.equal(bus.callsTo("codex", "wait_for_messages").at(-1).args.mark_read, false);
+  bus.post("general", "claude", "@codex look here");
+  await waitFor(() => runs().length === 2, { label: "mention run" });
+  assert.equal(bus.callsTo("codex", "read_room").length, 0, "inline room posts skip read_room");
+  assert.match(stdins()[1], /look here/);
+  const precise = bus.callsTo("codex", "wait_for_messages").some((call) => /\.\d{6}Z$/.test(call.args.since ?? ""));
+  assert.equal(precise, true);
+  await new Promise((r) => setTimeout(r, 500));
+  assert.equal(runs().length, 2, "the same posts are not delivered again");
 });
 
 test("crash recovery: persisted queue / running entry is re-run on start", async (t) => {

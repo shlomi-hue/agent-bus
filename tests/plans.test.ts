@@ -786,7 +786,7 @@ describe("postgres plans and results", () => {
     };
     await applyMigrations(sql, join(process.cwd(), "supabase/migrations"));
     const store = new PgStore(sql);
-    const config = loadConfig({ RATE_LIMIT_MAX: "100", ROOM_AGENT_CAP: "20" });
+    const config = loadConfig({ OWNER_NAME: "owner", RATE_LIMIT_MAX: "100", ROOM_AGENT_CAP: "20" });
     const bus = new AgentBus(store, config);
     const owner = await store.insertAgent({
       name: "owner",

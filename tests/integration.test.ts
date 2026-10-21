@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { PGlite } from "@electric-sql/pglite";
+import { PGlite, types } from "@electric-sql/pglite";
 import { describe, expect, it } from "vitest";
 import { hashToken, mintToken } from "../src/auth/tokens.js";
 import { AgentBus } from "../src/bus/service.js";
@@ -340,5 +340,56 @@ describe("postgres integration", () => {
     const inbox = await callTool(bus, caller(claude), "read_inbox", {}, config);
     expect(inbox.content[0]?.text).toContain("still a direct message");
     expect(inbox.content[0]?.text).not.toContain("go ahead");
+  });
+
+  it("round-trips a microsecond room cursor", async () => {
+    const db = new PGlite({
+      parsers: {
+        [types.TIMESTAMPTZ]: (value: string) => value,
+        [types.TIMESTAMP]: (value: string) => value,
+      },
+    });
+    const sql = client(db);
+    await applyMigrations(sql, join(process.cwd(), "supabase/migrations"));
+    const store = new PgStore(sql);
+    const config = loadConfig({ RATE_LIMIT_MAX: "100", WAIT_MAX_SECONDS: "1", ROOM_AGENT_CAP: "10" });
+    const bus = new AgentBus(store, config);
+    const owner = await store.insertAgent({
+      name: "owner",
+      description: "",
+      tokenHash: hashToken(mintToken()),
+      isHuman: true,
+    });
+    const codex = await store.insertAgent({
+      name: "codex",
+      description: "",
+      tokenHash: hashToken(mintToken()),
+    });
+    const human = { id: owner.id, name: "owner", isHuman: true };
+    const caller = { id: codex.id, name: "codex", isHuman: false };
+    await bus.createRoom(human, { name: "general" });
+    await bus.addMember(human, { room: "general", agent: "codex" });
+    await bus.sendRoom(human, { room: "general", body: "precise" });
+    const room = await store.getRoomByName("general");
+    if (!room) throw new Error("room missing");
+    await sql.query(`update public.messages set created_at = '2026-10-18 09:00:01.123456+00' where room_id = $1`, [
+      room.id,
+    ]);
+    const stored = await store.listRoomMessages({ roomId: room.id, since: null, limit: 5 });
+    expect(stored[0]?.createdAt).toBe("2026-10-18T09:00:01.123456Z");
+    const truncated = await bus.readRoom(caller, { room: "general", since: "2026-10-18T09:00:01.123Z" });
+    expect(truncated).toHaveLength(1);
+    const woke = await bus.waitForMessages(caller, {
+      since: "2026-10-18T09:00:01.000000Z",
+      timeout_seconds: 1,
+      mark_read: false,
+    });
+    expect(woke.cursor).toBe("2026-10-18T09:00:01.123456Z");
+    expect(woke.roomMessages.map((message) => message.body)).toEqual(["precise"]);
+    expect(woke.rooms).toEqual(["general"]);
+    const again = await bus.waitForMessages(caller, { since: woke.cursor, timeout_seconds: 1, mark_read: false });
+    expect(again.timedOut).toBe(true);
+    expect(again.roomMessages).toHaveLength(0);
+    expect(await bus.readRoom(caller, { room: "general", since: woke.cursor })).toHaveLength(0);
   });
 });

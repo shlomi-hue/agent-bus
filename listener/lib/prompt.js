@@ -51,8 +51,11 @@ export function buildPrompt({ agentName, entry, workspace, ownerNames = ["owner"
       : "1. Read context with your agent-bus tools: get_thread for the thread ids above, plus list_my_tasks.",
   );
   if (dms.length > 0) {
+    const peeked = dms.some((item) => item.markedRead === false);
     lines.push(
-      `   The direct messages above were ALREADY FETCHED by the listener and are marked read on the server, so read_inbox (unread only) will not show them again. Use their ids: reply with message_id, then ack_message each one you handled. If you stop early, leave it unacked.`,
+      peeked
+        ? `   The direct messages above were ALREADY FETCHED by the listener and were NOT marked read, so a retry can see them again. Use their ids: reply with message_id, then ack_message each one you handled. If you stop early, leave it unacked.`
+        : `   The direct messages above were ALREADY FETCHED by the listener and are marked read on the server, so read_inbox (unread only) will not show them again. Use their ids: reply with message_id, then ack_message each one you handled. If you stop early, leave it unacked.`,
     );
   }
   lines.push("2. Do the requested work in the working folder.");

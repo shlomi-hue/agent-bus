@@ -3,7 +3,7 @@ import { hashToken } from "../src/auth/tokens.js";
 import { runAdmin } from "../src/admin/cli.js";
 import { MemoryStore } from "../src/db/memory-store.js";
 
-function io(secret = "local-admin-secret-value") {
+function io(secret = "local-admin-secret-value", ownerName?: string) {
   const store = new MemoryStore();
   const stdout: string[] = [];
   const stderr: string[] = [];
@@ -14,6 +14,7 @@ function io(secret = "local-admin-secret-value") {
     admin: {
       store,
       adminSecret: secret,
+      ownerName,
       stdout: (line: string) => stdout.push(line),
       stderr: (line: string) => stderr.push(line),
     },
@@ -91,6 +92,13 @@ describe("admin CLI", () => {
 
     harness.stderr.length = 0;
     expect(await runAdmin(["seed-room", "--members", "owner,codex"], harness.admin)).toBe(0);
+  });
+
+  it("uses OWNER_NAME when the owner slug is set explicitly", async () => {
+    const harness = io("local-admin-secret-value", "owner");
+    expect(await runAdmin(["ensure-owner"], harness.admin)).toBe(0);
+    expect(harness.stdout.join("\n")).toContain("human: owner");
+    expect((await harness.store.getAgentByName("owner"))?.isHuman).toBe(true);
   });
 
   it("stores a webhook secret without printing it", async () => {

@@ -8,13 +8,19 @@ import { dispatchDue } from "../src/wake/deliver.js";
 import { createAgentBus } from "../src/wake/hook.js";
 import { planDeliveries } from "../src/wake/plan.js";
 import { signPayload } from "../src/wake/sign.js";
+import { formatWait } from "../src/bus/format.js";
 import { callTool } from "../src/mcp/tools.js";
 
 const SECRET = "webhook-secret-value";
 
 async function agents() {
   const store = new MemoryStore();
-  const config = loadConfig({ RATE_LIMIT_MAX: "100", WAIT_MAX_SECONDS: "2", ROOM_AGENT_CAP: "10" });
+  const config = loadConfig({
+    OWNER_NAME: "owner",
+    RATE_LIMIT_MAX: "100",
+    WAIT_MAX_SECONDS: "2",
+    ROOM_AGENT_CAP: "10",
+  });
   const owner = await store.insertAgent({
     name: "owner",
     description: "",
@@ -142,5 +148,103 @@ describe("wake-ups", () => {
     );
     expect(idle.isError).toBeUndefined();
     expect(idle.content[0]?.text).toContain("No new messages");
+  });
+
+  it("peeks without consuming, round-trips the cursor, and inlines room posts", async () => {
+    const { store, config, owner, codex, room } = await agents();
+    const bus = new AgentBus(store, config);
+    const human = { id: owner.id, name: owner.name, isHuman: true };
+    const caller = { id: codex.id, name: codex.name, isHuman: false };
+    const since = "2020-01-01T00:00:00.000Z";
+    await bus.send(human, { to: "codex", body: "still unread" });
+    await bus.sendRoom(human, { room: room.name, body: "hello in the room" });
+
+    const peeked = await callTool(
+      bus,
+      caller,
+      "wait_for_messages",
+      { since, timeout_seconds: 1, mark_read: false },
+      config,
+    );
+    const text = peeked.content[0]?.text ?? "";
+    expect(peeked.isError).toBeUndefined();
+    expect(text).toContain("mark_read: false");
+    expect(text).toContain("room_messages: inline");
+    expect(text).toContain("were not marked read");
+    expect(text).toContain("sender_kind: human");
+    expect(text).toContain('from: "owner" in room "general"');
+    expect(text).toContain("type: post");
+    expect(text).toContain("created_at:");
+    expect(text).toContain("Call read_room for each");
+    const cursor = text.match(/Pass since (\S+) on the next/)?.[1];
+    expect(cursor).toMatch(/\.\d{6}Z$/);
+    const direct = await store.listInbox({ toAgent: codex.id, unreadOnly: true, limit: 10, since: null });
+    expect(direct.map((message) => message.body)).toContain("still unread");
+
+    const again = await bus.waitForMessages(caller, { since: cursor, timeout_seconds: 1, mark_read: false });
+    expect(again.timedOut).toBe(true);
+    expect(again.messages).toHaveLength(0);
+    expect(again.roomMessages).toHaveLength(0);
+
+    const consumed = await callTool(bus, caller, "read_inbox", {}, config);
+    expect(consumed.content[0]?.text).toContain("These messages are now marked read");
+    const hidden = await callTool(bus, caller, "read_inbox", { mark_read: false }, config);
+    expect(hidden.content[0]?.text).toContain("no unread messages");
+    const kept = await callTool(
+      bus,
+      caller,
+      "read_inbox",
+      { unread_only: false, mark_read: false },
+      config,
+    );
+    expect(kept.content[0]?.text).toContain("were not marked read");
+    expect(kept.content[0]?.text).toContain("still unread");
+    const stillThere = await store.listInbox({ toAgent: codex.id, unreadOnly: true, limit: 10, since: null });
+    expect(stillThere).toHaveLength(0);
+    const readable = await store.listInbox({ toAgent: codex.id, unreadOnly: false, limit: 10, since: null });
+    expect(readable[0]?.readAt).toBeTruthy();
+  });
+
+  it("labels task-status room notices and does not skip a later room when a page is full", async () => {
+    const { store, config, owner, codex, room } = await agents();
+    const bus = new AgentBus(store, config);
+    const human = { id: owner.id, name: owner.name, isHuman: true };
+    const caller = { id: codex.id, name: codex.name, isHuman: false };
+    await bus.sendRoom(human, { room: room.name, body: "@codex ship the cursor" });
+    const open = await store.listTasks({ assigneeId: codex.id });
+    const task = open[0];
+    if (!task) throw new Error("task missing");
+    const first = await bus.waitForMessages(caller, {
+      since: "2020-01-01T00:00:00.000Z",
+      timeout_seconds: 1,
+      mark_read: false,
+    });
+    expect(first.roomMessages.some((message) => message.body.includes("@codex"))).toBe(true);
+    expect(first.tasks.map((item) => item.id)).toContain(task.id);
+    expect(first.cursor.endsWith("Z")).toBe(true);
+
+    await bus.updateTask(caller, { id: task.id, status: "working" });
+    const second = await bus.waitForMessages(caller, { since: first.cursor, timeout_seconds: 1, mark_read: false });
+    expect(second.roomMessages.map((message) => message.metadata.kind)).toContain("task_status");
+    const notice = second.roomMessages.find((message) => message.metadata.kind === "task_status");
+    expect(notice?.threadId).toBe(room.id);
+    const rendered = formatWait("codex", second);
+    expect(rendered).toContain("type: task_status");
+    expect(rendered).toContain(`updated ${second.tasks[0]?.updatedAt} thread ${second.tasks[0]?.threadId}`);
+
+    const other = await store.createRoom("later");
+    await store.addRoomMember(other.id, owner.id);
+    await store.addRoomMember(other.id, codex.id);
+    for (let index = 0; index < 21; index += 1) {
+      await bus.sendRoom(human, { room: room.name, body: `page ${index}` });
+    }
+    await bus.sendRoom(human, { room: "later", body: "after the full page" });
+    const paged = await bus.waitForMessages(caller, { since: second.cursor, timeout_seconds: 1, mark_read: false });
+    expect(paged.truncatedRooms).toContain("general");
+    expect(paged.roomMessages.some((message) => message.body === "after the full page")).toBe(false);
+    expect(paged.roomMessages).toHaveLength(20);
+    const rest = await bus.waitForMessages(caller, { since: paged.cursor, timeout_seconds: 1, mark_read: false });
+    expect(rest.roomMessages.map((message) => message.body)).toContain("page 20");
+    expect(rest.roomMessages.map((message) => message.body)).toContain("after the full page");
   });
 });

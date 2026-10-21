@@ -29,6 +29,7 @@ import {
   waitForMessagesSchema,
 } from "./schemas.js";
 import type { Plan, ResultCard } from "../db/types.js";
+import { canonicalTimestamp, compareInstants, isAfter, maxInstant, minInstant } from "../db/time.js";
 
 export type AfterMessage = (message: Message, tasks: Task[]) => Promise<void>;
 
@@ -38,8 +39,11 @@ export type WaitResult = {
   messages: Message[];
   tasks: Task[];
   rooms: string[];
+  roomMessages: Message[];
+  truncatedRooms: string[];
   cursor: string;
   timedOut: boolean;
+  markedRead: boolean;
 };
 
 export function nextHop(parentHop: number, maxHops: number): number {
@@ -122,24 +126,29 @@ export class AgentBus {
     return this.settle(caller, message);
   }
 
-  async readInbox(caller: Caller, raw: unknown): Promise<{ messages: Message[]; tasks: Task[] }> {
+  async readInbox(
+    caller: Caller,
+    raw: unknown,
+  ): Promise<{ messages: Message[]; tasks: Task[]; markedRead: boolean }> {
     const input = readInboxSchema(this.config).parse(raw ?? {});
     await this.consume(caller.id);
     const messages = await this.store.listInbox({
       toAgent: caller.id,
       unreadOnly: input.unread_only,
       limit: input.limit,
-      since: input.since ?? null,
+      since: input.since ? canonicalTimestamp(input.since) : null,
     });
-    await this.store.markRead(
-      caller.id,
-      messages.map((message) => message.id),
-    );
+    if (input.mark_read) {
+      await this.store.markRead(
+        caller.id,
+        messages.map((message) => message.id),
+      );
+    }
     const tasks = await this.store.listTasks({
       assigneeId: caller.id,
       statuses: ["open", "working"],
     });
-    return { messages, tasks };
+    return { messages, tasks, markedRead: input.mark_read };
   }
 
   async ack(caller: Caller, raw: unknown): Promise<Message> {
@@ -513,64 +522,107 @@ export class AgentBus {
     await this.consume(caller.id);
     const timeoutMs = (input.timeout_seconds ?? this.config.waitMaxSeconds) * 1000;
     const deadline = Date.now() + timeoutMs;
+    const deliver = async (
+      snapshot: Omit<WaitResult, "timedOut" | "markedRead">,
+      timedOut: boolean,
+    ): Promise<WaitResult> => {
+      if (!timedOut && input.mark_read && snapshot.messages.length > 0) {
+        await this.store.markRead(
+          caller.id,
+          snapshot.messages.map((message) => message.id),
+        );
+      }
+      return { ...snapshot, timedOut, markedRead: input.mark_read };
+    };
     if (!input.since) {
       const snapshot = await this.collectWait(caller, null);
       if (snapshot.messages.length > 0 || snapshot.tasks.length > 0) {
-        await this.store.markRead(
-          caller.id,
-          snapshot.messages.map((message) => message.id),
-        );
-        return { ...snapshot, timedOut: false };
+        return deliver(snapshot, false);
       }
     }
-    const since = input.since ?? new Date().toISOString();
+    const since = canonicalTimestamp(input.since ?? new Date().toISOString());
     while (Date.now() <= deadline) {
       const snapshot = await this.collectWait(caller, since);
-      if (snapshot.messages.length > 0 || snapshot.tasks.length > 0 || snapshot.rooms.length > 0) {
-        await this.store.markRead(
-          caller.id,
-          snapshot.messages.map((message) => message.id),
-        );
-        return { ...snapshot, timedOut: false };
+      if (snapshot.messages.length > 0 || snapshot.tasks.length > 0 || snapshot.roomMessages.length > 0) {
+        return deliver(snapshot, false);
       }
       if (Date.now() + 200 > deadline) break;
       await new Promise((resolve) => setTimeout(resolve, 200));
     }
-    return { messages: [], tasks: [], rooms: [], cursor: since, timedOut: true };
+    return deliver(
+      {
+        messages: [],
+        tasks: [],
+        rooms: [],
+        roomMessages: [],
+        truncatedRooms: [],
+        cursor: since,
+      },
+      true,
+    );
   }
 
-  private async collectWait(caller: Caller, since: string | null): Promise<Omit<WaitResult, "timedOut">> {
+  private async collectWait(caller: Caller, since: string | null): Promise<Omit<WaitResult, "timedOut" | "markedRead">> {
     const inbox = await this.store.listInbox({
       toAgent: caller.id,
       unreadOnly: true,
       limit: this.config.inboxDefaultLimit,
       since: null,
     });
-    const messages = since ? inbox.filter((message) => message.createdAt > since) : inbox;
-    const tasks = await this.store.listTasks({
+    let messages = since ? inbox.filter((message) => isAfter(message.createdAt, since)) : inbox;
+    let tasks = await this.store.listTasks({
       assigneeId: caller.id,
       statuses: ["open", "working"],
       updatedAfter: since,
     });
-    const rooms: string[] = [];
+    const pages: Array<{ name: string; messages: Message[]; truncated: boolean }> = [];
     if (since) {
+      const perRoom = this.config.inboxDefaultLimit;
       for (const room of await this.store.listRoomsForAgent(caller.id)) {
-        const fresh = await this.store.listRoomMessages({ roomId: room.id, since, limit: 1 });
-        if (fresh.length > 0) rooms.push(room.name);
+        const fresh = await this.store.listRoomMessages({
+          roomId: room.id,
+          since,
+          limit: perRoom + 1,
+        });
+        if (fresh.length === 0) continue;
+        const truncated = fresh.length > perRoom;
+        pages.push({
+          name: room.name,
+          messages: truncated ? fresh.slice(0, perRoom) : fresh,
+          truncated,
+        });
       }
     }
-    const stamps = [
-      ...messages.map((message) => message.createdAt),
-      ...tasks.map((task) => task.updatedAt),
-      since,
-    ].filter((value): value is string => Boolean(value));
-    stamps.sort();
-    return {
-      messages,
-      tasks,
-      rooms,
-      cursor: stamps.at(-1) ?? new Date().toISOString(),
-    };
+    const cutoff = minInstant(
+      pages
+        .filter((page) => page.truncated)
+        .map((page) => page.messages.at(-1)?.createdAt),
+    );
+    const keep = (stamp: string) => !cutoff || !isAfter(stamp, cutoff);
+    if (cutoff) {
+      messages = messages.filter((message) => keep(message.createdAt));
+      tasks = tasks.filter((task) => keep(task.updatedAt));
+    }
+    const roomMessages = pages
+      .flatMap((page) => page.messages)
+      .filter((message) => keep(message.createdAt))
+      .sort((a, b) => compareInstants(a.createdAt, b.createdAt) || a.id.localeCompare(b.id));
+    const rooms: string[] = [];
+    for (const message of roomMessages) {
+      if (message.roomName && !rooms.includes(message.roomName)) rooms.push(message.roomName);
+    }
+    const truncatedRooms = pages
+      .filter((page) => page.truncated && page.messages.some((message) => keep(message.createdAt)))
+      .map((page) => page.name);
+    const cursor = canonicalTimestamp(
+      maxInstant([
+        since,
+        ...messages.map((message) => message.createdAt),
+        ...tasks.map((task) => task.updatedAt),
+        ...roomMessages.map((message) => message.createdAt),
+      ]) ?? new Date().toISOString(),
+    );
+    return { messages, tasks, rooms, roomMessages, truncatedRooms, cursor };
   }
 
   async readRoom(caller: Caller, raw: unknown): Promise<Message[]> {
@@ -580,7 +632,7 @@ export class AgentBus {
     await this.requireMember(room, caller.id);
     return this.store.listRoomMessages({
       roomId: room.id,
-      since: input.since ?? null,
+      since: input.since ? canonicalTimestamp(input.since) : null,
       limit: input.limit,
     });
   }
