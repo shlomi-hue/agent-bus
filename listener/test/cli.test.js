@@ -126,3 +126,36 @@ test("pause / resume / status / doctor", async (t) => {
   assert.ok(!d.stdout.includes("tok-"), "doctor never prints token values");
   assert.equal((await run(["bogus"])).status, 2);
 });
+
+test("health: missing claude is a warning; present but logged out fails; logged in passes and never prints the token", async (t) => {
+  const dir = tmpdir();
+  const bus = new MockAgentBus();
+  const url = await bus.listen();
+  t.after(() => bus.close());
+  const missing = writeConfig(dir, url);
+  const skipped = await run(["health", "--config", missing]);
+  assert.equal(skipped.status, 0, skipped.stdout);
+  assert.match(skipped.stdout, /WARN\s+claude CLI/);
+  assert.match(skipped.stdout, /OK\s+codex CLI/);
+  assert.ok(!skipped.stdout.includes("tok-"));
+
+  const authed = writeConfig(dir, url, {
+    agents: {
+      codex: { bin: path.join(FIXTURES, "fake-codex.sh") },
+      claude: { bin: path.join(FIXTURES, "fake-claude.sh") },
+    },
+  });
+  const ok = await run(["health", "--config", authed], { FAKE_AUTH: "ok", FAKE_LOG: path.join(dir, "health-ok.log") });
+  assert.equal(ok.status, 0, ok.stdout + ok.stderr);
+  assert.match(ok.stdout, /OK\s+claude auth — logged in \(claude.ai\)/);
+  assert.match(ok.stdout, /permission-mode dontAsk/);
+  assert.match(ok.stdout, /allowlist Read, Edit, Write, mcp__agent_bus__\*/);
+  assert.ok(!/allowlist.*\bBash\b/.test(ok.stdout));
+  assert.ok(!ok.stdout.includes("tok-claude"));
+
+  const loggedOut = await run(["health", "--config", authed], { FAKE_AUTH: "missing", FAKE_LOG: path.join(dir, "health-out.log") });
+  assert.equal(loggedOut.status, 1, loggedOut.stdout);
+  assert.match(loggedOut.stdout, /FAIL\s+claude auth/);
+  assert.match(loggedOut.stdout, /not logged in/);
+  assert.ok(!loggedOut.stdout.includes("tok-"));
+});

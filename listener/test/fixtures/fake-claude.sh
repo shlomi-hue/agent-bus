@@ -1,5 +1,8 @@
 #!/bin/bash
-# Fake `claude` for tests. Records argv, the --mcp-config file mode/content check, emits a JSON result.
+# Fake `claude` for tests.
+# Records argv. `auth status` prints Claude Code's auth JSON and exits 0, or 1 when FAKE_AUTH=missing.
+# A normal -p run emits one --output-format json result unless FAKE_STDOUT is set.
+# Env: FAKE_LOG, FAKE_SLEEP, FAKE_EXIT, FAKE_BAD_SESSIONS, FAKE_STDOUT, FAKE_AUTH (ok|missing).
 set -u
 log="${FAKE_LOG:-/dev/null}"
 {
@@ -7,8 +10,21 @@ log="${FAKE_LOG:-/dev/null}"
   printf '%s\n' "$@"
   echo "END"
 } >>"$log"
+
+if [ "${1:-}" = "--version" ]; then
+  echo "0.0.0 (Claude Code fake)"
+  exit 0
+fi
+if [ "${1:-}" = "auth" ] && [ "${2:-}" = "status" ]; then
+  if [ "${FAKE_AUTH:-ok}" = "missing" ]; then
+    echo '{"authMethod":"none"}'
+    exit 1
+  fi
+  echo '{"authMethod":"claude.ai"}'
+  exit 0
+fi
+
 cat >/dev/null
-if [ "${1:-}" = "--version" ]; then echo "0.0.0 (Claude Code fake)"; exit 0; fi
 sid=""
 resume=""
 prev=""
@@ -35,5 +51,9 @@ if [ -n "$resume" ]; then
   sid="$resume"
 fi
 if [ -n "${FAKE_SLEEP:-}" ]; then sleep "$FAKE_SLEEP"; fi
-echo "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"done\",\"session_id\":\"$sid\"}"
+if [ -n "${FAKE_STDOUT+x}" ] && [ -n "${FAKE_STDOUT}" ]; then
+  printf '%s\n' "$FAKE_STDOUT"
+else
+  echo "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"done\",\"session_id\":\"$sid\"}"
+fi
 exit "${FAKE_EXIT:-0}"

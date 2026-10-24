@@ -19,7 +19,18 @@ export function describeConversation(key) {
  * Build the prompt for one run. Direct messages were fetched by the listener's wait_for_messages
  * call, which marks them read on the server, so their full content is included here.
  */
-export function buildPrompt({ agentName, entry, workspace, ownerNames = ["owner"], resumed = false, maxBodyChars = 6000, maxItems = 25 }) {
+function accessLine(workspace, access) {
+  if (access?.kind === "claude" && access.bypass) {
+    return `Working folder: ${workspace} (the process working directory; shared by all conversations). This run was started with --dangerously-skip-permissions. Edit files and run commands carefully.`;
+  }
+  if (access?.kind === "claude") {
+    const tools = (access.allowedTools ?? []).join(", ") || "(none)";
+    return `Working folder: ${workspace} (the process working directory; shared by all conversations). Permission mode is ${access.permissionMode || "dontAsk"}: only pre-approved tools run, and anything that would prompt is denied. Pre-approved tools: ${tools}. Agent-bus MCP server: ${access.mcpServerName || "agent_bus"} (already attached for this run; do not ask for a token).`;
+  }
+  return `Working folder: ${workspace} (shared by all conversations). You have full permissions: edit files and run commands, carefully.`;
+}
+
+export function buildPrompt({ agentName, entry, workspace, ownerNames = ["owner"], resumed = false, maxBodyChars = 6000, maxItems = 25, access = null }) {
   const owner = ownerNames[0];
   const triggers = entry.triggers.slice(-maxItems);
   const omitted = entry.triggers.length - triggers.length + (entry.dropped ?? 0);
@@ -28,7 +39,7 @@ export function buildPrompt({ agentName, entry, workspace, ownerNames = ["owner"
   const lines = [];
   lines.push(`[agent-bus wake-up] You are agent "${agentName}" on agent-bus. The agent-bus listener on ${owner}'s Mac started this run because new items arrived.`);
   lines.push(`Conversation: ${conv} (listener session key ${entry.key}).${resumed ? " This continues your earlier session for this conversation." : ""}`);
-  lines.push(`Working folder: ${workspace} (shared by all conversations). You have full permissions: edit files and run commands, carefully.`);
+  lines.push(accessLine(workspace, access));
   lines.push("");
   lines.push(`New items (${triggers.length}${omitted > 0 ? `, ${omitted} older item(s) omitted; read the conversation for them` : ""}):`);
   triggers.forEach((t, i) => {

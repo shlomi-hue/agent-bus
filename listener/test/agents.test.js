@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import path from "node:path";
 import {
   buildCodexCommand,
   buildClaudeCommand,
@@ -8,10 +9,13 @@ import {
   extractClaudeSessionId,
   isResumeFailure,
   writeClaudeMcpConfig,
+  assessClaudeResult,
+  readClaudeAuth,
+  claudeAllowedTools,
 } from "../lib/agents.js";
 import { buildPrompt } from "../lib/prompt.js";
 import { childEnv } from "../lib/listener.js";
-import { tmpdir } from "./helpers.js";
+import { tmpdir, FIXTURES } from "./helpers.js";
 
 const BIN = "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex";
 const codex = { name: "codex", bin: BIN, model: null, extraArgs: [] };
@@ -31,14 +35,52 @@ test("codex argv: resume (exact)", () => {
   ]);
 });
 
-test("claude argv: new and resume (exact)", () => {
-  const claude = { name: "claude", bin: "/opt/homebrew/bin/claude", model: null, extraArgs: [] };
+const SAFE_PREFIX = [
+  "-p", "--output-format", "json",
+  "--permission-mode", "dontAsk", "--permission-prompts", "none",
+  "--allowedTools", "Read,Edit,Write,mcp__agent_bus__*",
+  "--strict-mcp-config",
+];
+
+test("claude argv: safe dontAsk allowlist by default; resume; full bypass only when configured", () => {
+  const claude = {
+    name: "claude",
+    bin: "/opt/homebrew/bin/claude",
+    model: null,
+    extraArgs: [],
+    permissionMode: "dontAsk",
+    allowedTools: ["Read", "Edit", "Write", "Bash", "mcp__agent_bus__*"],
+    allowBash: false,
+    dangerouslySkipPermissions: false,
+    maxTurns: null,
+  };
   assert.deepEqual(buildClaudeCommand({ agent: claude, newSessionId: "u-1", mcpConfigPath: "/r/m.json" }).args, [
-    "-p", "--output-format", "json", "--dangerously-skip-permissions", "--mcp-config", "/r/m.json", "--session-id", "u-1",
+    ...SAFE_PREFIX, "--mcp-config", "/r/m.json", "--session-id", "u-1",
   ]);
-  assert.deepEqual(buildClaudeCommand({ agent: claude, sessionId: "s-9", mcpConfigPath: "/r/m.json" }).args, [
-    "-p", "--output-format", "json", "--dangerously-skip-permissions", "--mcp-config", "/r/m.json", "--resume", "s-9",
+  assert.deepEqual(buildClaudeCommand({ agent: { ...claude, model: "sonnet", maxTurns: 3, extraArgs: ["--append-system-prompt", "be brief"] }, sessionId: "s-9", mcpConfigPath: "/r/m.json" }).args, [
+    ...SAFE_PREFIX, "--mcp-config", "/r/m.json", "--model", "sonnet", "--max-turns", "3", "--append-system-prompt", "be brief", "--resume", "s-9",
   ]);
+  const bypass = buildClaudeCommand({ agent: { ...claude, dangerouslySkipPermissions: true }, newSessionId: "u-1", mcpConfigPath: "/r/m.json" }).args;
+  assert.ok(bypass.includes("--dangerously-skip-permissions"));
+  assert.ok(!bypass.includes("--permission-mode"));
+  assert.ok(!bypass.includes("--allowedTools"));
+  assert.deepEqual(claudeAllowedTools(claude), ["Read", "Edit", "Write", "mcp__agent_bus__*"]);
+});
+
+test("claude allowBash is opt-in; a leftover Bash entry does not grant a shell", () => {
+  const base = {
+    permissionMode: "dontAsk",
+    allowedTools: ["Read", "Bash", "Bash(*)", "Bash(git status *)", "mcp__agent_bus__*"],
+    allowBash: false,
+  };
+  assert.deepEqual(claudeAllowedTools(base), ["Read", "Bash(git status *)", "mcp__agent_bus__*"]);
+  assert.equal(buildClaudeCommand({ agent: base, newSessionId: "u-1" }).args.join(" "), [
+    "-p --output-format json --permission-mode dontAsk --permission-prompts none",
+    "--allowedTools Read,Bash(git status *),mcp__agent_bus__* --strict-mcp-config --session-id u-1",
+  ].join(" "));
+  const optedIn = claudeAllowedTools({ ...base, allowBash: true });
+  assert.deepEqual(optedIn, ["Read", "Bash(git status *)", "mcp__agent_bus__*", "Bash"]);
+  assert.ok(buildClaudeCommand({ agent: { ...base, allowBash: true }, newSessionId: "u-1" }).args.includes("Read,Bash(git status *),mcp__agent_bus__*,Bash"));
 });
 
 test("codex session id extraction (current + legacy shapes)", () => {
@@ -46,6 +88,27 @@ test("codex session id extraction (current + legacy shapes)", () => {
   assert.equal(extractCodexSessionId('noise\n{"id":"0","msg":{"type":"session_configured","session_id":"5973b6c0-94b8-487b-a530-2aeb6098ae0e"}}'), "5973b6c0-94b8-487b-a530-2aeb6098ae0e");
   assert.equal(extractCodexSessionId('{"type":"session.created","session_id":"5973b6c0-94b8-487b-a530-2aeb6098ae0f"}'), "5973b6c0-94b8-487b-a530-2aeb6098ae0f");
   assert.equal(extractCodexSessionId('{"type":"turn.started"}'), null);
+});
+
+test("claude result: success, is_error, error subtype, and unparseable stdout", () => {
+  assert.equal(assessClaudeResult('{"type":"result","subtype":"success","is_error":false,"result":"done","session_id":"abc"}').ok, true);
+  assert.equal(assessClaudeResult('{"result":"done","session_id":"abc"}').ok, true);
+  assert.equal(assessClaudeResult('{"type":"result","subtype":"success","is_error":true,"result":"nope"}').reason, "is_error");
+  assert.equal(assessClaudeResult('{"type":"result","subtype":"error_during_execution","is_error":false}').reason, "error_during_execution");
+  assert.equal(assessClaudeResult("not json").reason, "json-parse");
+  assert.equal(assessClaudeResult('{"foo":1}').reason, "json-shape");
+});
+
+test("claude auth status: logged in, missing, and the detail has no secrets", () => {
+  const bin = path.join(FIXTURES, "fake-claude.sh");
+  const ok = readClaudeAuth(bin, { env: { ...process.env, FAKE_AUTH: "ok", FAKE_LOG: "/dev/null" } });
+  assert.equal(ok.loggedIn, true);
+  assert.equal(ok.authMethod, "claude.ai");
+  const missing = readClaudeAuth(bin, { env: { ...process.env, FAKE_AUTH: "missing", FAKE_LOG: "/dev/null" } });
+  assert.equal(missing.loggedIn, false);
+  assert.equal(missing.authMethod, "none");
+  assert.match(missing.detail, /not logged in/);
+  assert.ok(!missing.detail.includes("secret"));
 });
 
 test("claude session id extraction", () => {
