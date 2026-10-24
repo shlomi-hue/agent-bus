@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { spawnSync } from "node:child_process";
 
 /**
  * Exact argv construction for the headless CLIs. The prompt is passed on stdin ("-" for codex,
@@ -12,10 +13,27 @@ import { randomUUID } from "node:crypto";
  *   (`resume` has no -C of its own, so -C goes on `exec` before the subcommand.)
  *   Session id: first JSONL event {"type":"thread.started","thread_id":"<uuid>"}.
  *
- * claude (verified against Claude Code 2.1.197 `claude --help`):
- *   new:    claude -p --output-format json --dangerously-skip-permissions --mcp-config <file> [--model M] [extra] --session-id <uuid>
- *   resume: claude -p --output-format json --dangerously-skip-permissions --mcp-config <file> [--model M] [extra] --resume <SESSION_ID>
- *   Session id: "session_id" in the final JSON result.
+ * claude (verified against https://code.claude.com/docs/en/headless,
+ * https://code.claude.com/docs/en/cli-reference, and https://code.claude.com/docs/en/permission-modes):
+ *   print:    -p / --print. The prompt is stdin. There is no --cwd flag on `claude -p`;
+ *             the process working directory is the session directory. --add-dir only adds extra dirs.
+ *   output:   --output-format json  (one object: result, session_id, metadata).
+ *             stream-json is newline-delimited and, for token deltas, also needs --verbose
+ *             and --include-partial-messages. The listener uses json.
+ *   safe:     --permission-mode dontAsk --permission-prompts none --allowedTools "A,B,C"
+ *             (--permission-prompts requires Claude Code v2.1.259+)
+ *             Bash is included only when agents.claude.allowBash is true.
+ *   full:     --dangerously-skip-permissions  ONLY when dangerouslySkipPermissions is true.
+ *             The CLI documents that flag as equivalent to --permission-mode bypassPermissions.
+ *   mcp:      --strict-mcp-config --mcp-config <file>   (HTTP server, bearer header, mode 0600)
+ *   model:    --model <alias or full id>
+ *   turns:    --max-turns <n>   (print mode only; omitted when unset; no limit is the CLI default)
+ *   session:  --session-id <uuid> | --resume <id>
+ *   auth:     `claude auth status` exits 0 when logged in and 1 when not. JSON authMethod "none" means logged out.
+ *   new:    claude -p --output-format json --permission-mode dontAsk --permission-prompts none
+ *             --allowedTools "<list>" --strict-mcp-config --mcp-config <file> [--model M] [--max-turns N] [extra] --session-id <uuid>
+ *   resume: the same, with --resume <SESSION_ID> instead of --session-id
+ *   Session id: "session_id" on the JSON result (and on stream-json events).
  */
 
 export function buildCodexCommand({ agent, workspace, sessionId = null, lastMessageFile }) {
@@ -28,11 +46,35 @@ export function buildCodexCommand({ agent, workspace, sessionId = null, lastMess
   return { bin: agent.bin, args: ["exec", ...common, "-C", workspace, ...model, ...agent.extraArgs, ...out, "-"] };
 }
 
+/**
+ * Effective --allowedTools list. Bare Bash and Bash(*) are omitted unless allowBash is true,
+ * then Bash is appended once. Narrower rules such as Bash(git status *) stay as written.
+ */
+export function claudeAllowedTools(agent) {
+  const tools = Array.isArray(agent.allowedTools) ? agent.allowedTools.map(String).filter(Boolean) : [];
+  const withoutBareBash = tools.filter((tool) => tool !== "Bash" && tool !== "Bash(*)");
+  if (agent.allowBash === true) return [...withoutBareBash, "Bash"];
+  return withoutBareBash;
+}
+
+/**
+ * Argv for one headless Claude Code run.
+ * Working directory is not an argv flag: the caller sets the child cwd to the workspace.
+ */
 export function buildClaudeCommand({ agent, sessionId = null, newSessionId = null, mcpConfigPath }) {
-  const args = ["-p", "--output-format", "json", "--dangerously-skip-permissions"];
+  const args = ["-p", "--output-format", "json"];
+  if (agent.dangerouslySkipPermissions === true) {
+    args.push("--dangerously-skip-permissions");
+  } else {
+    args.push("--permission-mode", agent.permissionMode || "dontAsk", "--permission-prompts", "none");
+    const tools = claudeAllowedTools(agent);
+    if (tools.length) args.push("--allowedTools", tools.join(","));
+  }
+  args.push("--strict-mcp-config");
   if (mcpConfigPath) args.push("--mcp-config", mcpConfigPath);
   if (agent.model) args.push("--model", String(agent.model));
-  args.push(...agent.extraArgs);
+  if (agent.maxTurns) args.push("--max-turns", String(agent.maxTurns));
+  args.push(...(agent.extraArgs ?? []));
   if (sessionId) args.push("--resume", sessionId);
   else if (newSessionId) args.push("--session-id", newSessionId);
   return { bin: agent.bin, args };
@@ -136,6 +178,63 @@ export function claudeResult(stdout) {
   } catch {
     return null;
   }
+}
+
+/**
+ * --output-format json is one object with `result` and `session_id`.
+ * stream-json ends with a `type: "result"` event (`subtype: "success"` or an error subtype).
+ * A non-object, or an object that is neither shape, is a parse failure.
+ */
+export function assessClaudeResult(stdout) {
+  const result = claudeResult(stdout);
+  if (!result || typeof result !== "object" || Array.isArray(result)) return { ok: false, reason: "json-parse", result: null };
+  if (result.is_error === true) return { ok: false, reason: "is_error", result };
+  if (typeof result.subtype === "string" && result.subtype !== "success") return { ok: false, reason: result.subtype, result };
+  if (result.type === "result" || Object.prototype.hasOwnProperty.call(result, "result") || typeof result.session_id === "string") {
+    return { ok: true, reason: "ok", result };
+  }
+  return { ok: false, reason: "json-shape", result };
+}
+
+function parseAuthJson(text) {
+  const raw = String(text ?? "").trim();
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    /* a banner line may precede the object */
+  }
+  for (const line of raw.split(/\r?\n/)) {
+    const t = line.trim();
+    if (!t.startsWith("{")) continue;
+    try {
+      return JSON.parse(t);
+    } catch {
+      /* keep looking */
+    }
+  }
+  return null;
+}
+
+/**
+ * `claude auth status` (https://code.claude.com/docs/en/cli-reference).
+ * Exit 0 means logged in. Exit 1 means not. authMethod "none" is logged out even if the status is odd.
+ * The returned detail never includes stdout, stderr, or tokens.
+ */
+export function readClaudeAuth(bin, { env = process.env, timeoutMs = 20_000 } = {}) {
+  const r = spawnSync(bin, ["auth", "status"], { encoding: "utf8", timeout: timeoutMs, env });
+  if (r.error) {
+    const timedOut = r.error.code === "ETIMEDOUT";
+    return { loggedIn: false, authMethod: null, status: r.status ?? null, detail: timedOut ? "claude auth status timed out" : "claude auth status failed to start" };
+  }
+  const parsed = parseAuthJson(r.stdout) ?? parseAuthJson(r.stderr);
+  const authMethod = typeof parsed?.authMethod === "string" ? parsed.authMethod : null;
+  const loggedIn = r.status === 0 && authMethod !== "none";
+  let detail;
+  if (loggedIn) detail = `logged in${authMethod ? ` (${authMethod})` : ""}`;
+  else if (r.status === 1 || authMethod === "none") detail = "not logged in. Run `claude auth login` once; headless -p runs reuse that login";
+  else detail = `claude auth status exited ${r.status ?? "null"}`;
+  return { loggedIn, authMethod, status: r.status ?? null, detail };
 }
 
 /** Write the per-run Claude MCP config (0600) and return its path. Token is never logged. */
