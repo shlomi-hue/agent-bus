@@ -14,7 +14,7 @@ async function setup(t, { agent = "codex", cfg: over = {}, env = {}, seed, proto
   const url = await bus.listen();
   const cfg = testConfig(dir, { mcpUrl: url, ...over });
   const argvLog = path.join(dir, "argv.log");
-  Object.assign(process.env, { FAKE_LOG: argvLog, FAKE_SLEEP: "", FAKE_EXIT: "0", FAKE_BAD_SESSIONS: "", ...env });
+  Object.assign(process.env, { FAKE_LOG: argvLog, FAKE_SLEEP: "", FAKE_EXIT: "0", FAKE_BAD_SESSIONS: "", FAKE_STDOUT: "", FAKE_AUTH: "", ...env });
   const logger = new Logger({ file: path.join(cfg.logDir, "listener.log"), secrets: Object.values(bus.tokens) });
   const store = new StateStore(cfg.stateFile).load();
   if (seed) seed(store.agent(agent), bus);
@@ -228,7 +228,7 @@ test("reconcile: unacked DM consumed elsewhere is dispatched after grace", async
   const { bus, runs, stdins } = await setup(t, { cfg: { reconcile: { enabled: true, intervalSeconds: 0, graceSeconds: 0, windowHours: 6 } } });
   const m = bus.dm("owner", "codex", "read by someone else, never acked");
   m.readAt = new Date().toISOString(); // e.g. an interactive session read it first
-  await waitFor(() => runs().length === 1, { label: "reconcile run" });
+  await waitFor(() => runs().length === 1 && stdins().length === 1, { label: "reconcile run" });
   assert.match(stdins()[0], /found by reconcile/);
 });
 
@@ -237,7 +237,13 @@ test("claude: per-run MCP config (0600, deleted after), --session-id then --resu
   const m = bus.dm("owner", "claude", "hi claude");
   await waitFor(() => runs().length === 1 && loop.st.sessions[`dm:${m.threadId}`], { label: "claude run" });
   const a = runs()[0];
-  assert.deepEqual(a.slice(0, 5), ["-p", "--output-format", "json", "--dangerously-skip-permissions", "--mcp-config"]);
+  assert.deepEqual(a.slice(0, 11), [
+    "-p", "--output-format", "json",
+    "--permission-mode", "dontAsk", "--permission-prompts", "none",
+    "--allowedTools", "Read,Edit,Write,mcp__agent_bus__*",
+    "--strict-mcp-config", "--mcp-config",
+  ]);
+  assert.ok(!a.includes("--dangerously-skip-permissions"));
   const sidIdx = a.indexOf("--session-id");
   assert.ok(sidIdx > 0);
   const sid = a[sidIdx + 1];
@@ -264,4 +270,48 @@ test("planAgents skips claude when its CLI is missing, and agents without tokens
   assert.ok(log.lines.some((l) => /claude: claude CLI not found/.test(l)));
   const plans2 = planAgents(cfg, {}, memLog());
   assert.equal(plans2.length, 0);
+});
+
+test("planAgents skips claude when auth status says logged out", () => {
+  const dir = tmpdir();
+  const cfg = testConfig(dir);
+  process.env.FAKE_AUTH = "missing";
+  process.env.FAKE_LOG = path.join(dir, "argv.log");
+  try {
+    const log = memLog();
+    const plans = planAgents(cfg, { CODEX_TOKEN: "x".repeat(10), CLAUDE_TOKEN: "y".repeat(10) }, log);
+    assert.deepEqual(plans.map((p) => p.agent.name), ["codex"]);
+    assert.ok(log.lines.some((l) => /not authenticated/.test(l)));
+    assert.ok(log.lines.filter((l) => /not authenticated/.test(l)).length === 1);
+  } finally {
+    process.env.FAKE_AUTH = "";
+  }
+});
+
+test("claude JSON parse error fails the run and is retried", async (t) => {
+  const { bus, loop } = await setup(t, { agent: "claude", env: { FAKE_STDOUT: "not json at all" } });
+  const m = bus.dm("owner", "claude", "bad json");
+  await waitFor(() => loop.st.lastRun, { label: "parse failure" });
+  assert.equal(loop.st.lastRun.ok, false);
+  const e = loop.queue.entries.get(`dm:${m.threadId}`);
+  assert.equal(e.attempts, 1);
+  assert.match(fs.readFileSync(path.join(loop.cfg.logDir, "listener.log"), "utf8"), /rejected \(json-parse\)/);
+});
+
+test("claude non-zero exit is a failed run", async (t) => {
+  const { bus, loop } = await setup(t, { agent: "claude", env: { FAKE_EXIT: "2" } });
+  const m = bus.dm("owner", "claude", "crash");
+  await waitFor(() => loop.st.lastRun, { label: "nonzero" });
+  assert.equal(loop.st.lastRun.ok, false);
+  assert.equal(loop.st.lastRun.code, 2);
+  assert.equal(loop.queue.entries.get(`dm:${m.threadId}`).attempts, 1);
+});
+
+test("claude timeout kills the CLI and schedules a retry", async (t) => {
+  const { bus, loop } = await setup(t, { agent: "claude", cfg: { runTimeoutMinutes: 0.01 }, env: { FAKE_SLEEP: "30" } });
+  const m = bus.dm("owner", "claude", "slow");
+  await waitFor(() => loop.st.lastRun, { timeout: 15000, label: "claude timeout" });
+  assert.equal(loop.st.lastRun.timedOut, true);
+  assert.equal(loop.st.lastRun.ok, false);
+  assert.equal(loop.queue.entries.get(`dm:${m.threadId}`).attempts, 1);
 });

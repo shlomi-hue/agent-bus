@@ -10,6 +10,7 @@ import { McpClient } from "./mcp-client.js";
 import { parseRoomList, parseRoomLog, parseTaskList, parseWait } from "./parse.js";
 import { evaluateDm, evaluateRoomMessages, evaluateTask } from "./triggers.js";
 import { resolveBinary, isoPlusMs, fileExists } from "./util.js";
+import { readClaudeAuth, claudeAllowedTools } from "./agents.js";
 
 const EXPECTED_TOOLS = [
   "wait_for_messages",
@@ -60,6 +61,7 @@ Commands:
              Uses only non-consuming reads unless --poll is given (one wait_for_messages call,
              which marks newly arrived direct messages read for that agent).
   doctor     Check node, codex/claude paths, tokens (names only), MCP reachability, workspace
+  health     Check node, Codex, and Claude Code (binary plus \`claude auth status\`). No MCP calls.
 
 Options:
   --config <file>       config.json to use (default: next to the code, else ~/.agent-bus/listener/config.json)
@@ -98,6 +100,8 @@ export async function main(argv) {
       return cmdTest(opts);
     case "doctor":
       return cmdDoctor(opts);
+    case "health":
+      return cmdHealth(opts);
     default:
       process.stderr.write(`unknown command: ${cmd}\n\n${USAGE}`);
       return 2;
@@ -387,7 +391,7 @@ async function cmdDoctor(opts) {
   const results = [];
   const check = (ok, label, detail = "") => {
     results.push(ok);
-    process.stdout.write(`${ok === true ? "OK  " : ok === "warn" ? "WARN" : "FAIL"}  ${label}${detail ? ` — ${detail}` : ""}\n`);
+    process.stdout.write(`${ok === true ? "OK  " : ok === "warn" ? "WARN" : "FAIL"}  ${label}${detail ? ` \u2014 ${detail}` : ""}\n`);
   };
   let cfg;
   try {
@@ -420,6 +424,10 @@ async function cmdDoctor(opts) {
     }
     const v = spawnSync(bin, ["--version"], { encoding: "utf8", timeout: 20_000, env: { ...process.env, PATH: searchPath } });
     check(v.status === 0 ? true : "warn", `${agent.name} CLI`, `${bin} ${(v.stdout || v.stderr || "").trim().split("\n")[0]}`);
+    if (agent.cli === "claude") {
+      const auth = readClaudeAuth(bin, { env: { ...process.env, PATH: searchPath } });
+      check(auth.loggedIn ? true : false, `${agent.name} auth`, auth.detail);
+    }
   }
   const codexCfg = path.join(os.homedir(), ".codex", "config.toml");
   if (cfg.agents.codex?.enabled) {
@@ -454,4 +462,53 @@ async function cmdDoctor(opts) {
   } else check(false, "MCP reachable", "no token available to probe with");
   process.stdout.write(`\npackage: ${packageRoot()}\n`);
   return results.includes(false) ? 1 : 0;
+}
+
+/** Local readiness. Does not call agent-bus. A missing Claude binary is a warning; a present but logged-out CLI fails. */
+function cmdHealth(opts) {
+  let cfg;
+  try {
+    cfg = loadAll(opts);
+  } catch (error) {
+    process.stdout.write(`FAIL  config \u2014 ${error.message}\n`);
+    return 1;
+  }
+  let failed = false;
+  const line = (ok, label, detail = "") => {
+    if (ok === false) failed = true;
+    process.stdout.write(`${ok === true ? "OK  " : ok === "warn" ? "WARN" : "FAIL"}  ${label}${detail ? ` \u2014 ${detail}` : ""}\n`);
+  };
+  const major = Number(process.versions.node.split(".")[0]);
+  line(major >= 20, "node", `${process.execPath} ${process.version}${major >= 20 ? "" : " (need >= 20)"}`);
+  const searchPath = [cfg.childPath, process.env.PATH].filter(Boolean).join(":");
+  const tokens = fileExists(cfg.tokensFile) ? loadTokens(cfg.tokensFile) : {};
+  if (!fileExists(cfg.tokensFile)) line(false, "tokens file", `${cfg.tokensFile} not found`);
+  else line(true, "token names present", Object.keys(tokens).join(", ") || "(none)");
+  let sawAgent = false;
+  for (const agent of Object.values(cfg.agents)) {
+    if (opts.agent && agent.name !== opts.agent) continue;
+    sawAgent = true;
+    if (!agent.enabled) {
+      line("warn", agent.name, "disabled in config");
+      continue;
+    }
+    line(tokens[agent.tokenEnv] ? true : false, `${agent.name} token`, `${agent.tokenEnv} ${tokens[agent.tokenEnv] ? "present" : "missing"}`);
+    if (agent.cli === "none") continue;
+    const bin = resolveBinary(agent.bin, searchPath);
+    if (!bin) {
+      line(agent.cli === "claude" ? "warn" : false, `${agent.name} CLI`, `"${agent.bin}" not found${agent.cli === "claude" ? " (claude will be skipped until it is installed)" : ""}`);
+      continue;
+    }
+    const v = spawnSync(bin, ["--version"], { encoding: "utf8", timeout: 20_000, env: { ...process.env, PATH: searchPath } });
+    const version = (v.stdout || v.stderr || "").trim().split("\n")[0];
+    line(v.status === 0, `${agent.name} CLI`, `${bin} ${version}`);
+    if (agent.cli === "claude") {
+      const auth = readClaudeAuth(bin, { env: { ...process.env, PATH: searchPath } });
+      line(auth.loggedIn, `${agent.name} auth`, auth.detail);
+      if (agent.dangerouslySkipPermissions === true) line("warn", `${agent.name} permissions`, "dangerouslySkipPermissions is on (--dangerously-skip-permissions)");
+      else line(true, `${agent.name} permissions`, `--permission-mode ${agent.permissionMode || "dontAsk"}; allowlist ${claudeAllowedTools(agent).join(", ") || "(empty)"}`);
+    }
+  }
+  if (!sawAgent) line(false, "agents", opts.agent ? `no agent named ${opts.agent}` : "none configured");
+  return failed ? 1 : 0;
 }
