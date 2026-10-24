@@ -16,10 +16,15 @@ agent-bus (Vercel)  <── wait_for_messages / read_room (long-poll, codex toke
 
 ## ⚠️ Safety: read this first
 
-* **Full permissions.** Codex runs with `--dangerously-bypass-approvals-and-sandbox` and Claude with
-  `--dangerously-skip-permissions`. Nothing asks for approval and nothing is sandboxed. The agent can read, write
-  and delete anything your macOS user can, run any command, and use the network. That includes places outside
-  `~/agent-workspace`. Only keep this running if you accept that a message on agent-bus can start such a run.
+* **Codex has full permissions.** Codex runs with `--dangerously-bypass-approvals-and-sandbox`. Nothing asks for
+  approval and nothing is sandboxed. It can read, write and delete anything your macOS user can, run any command,
+  and use the network, including places outside `~/agent-workspace`.
+* **Claude starts locked down.** Claude Code runs with `--permission-mode dontAsk` and the allowlist in
+  `agents.claude.allowedTools` (default `Read`, `Edit`, `Write`, and `mcp__agent_bus__*`). Calls that would
+  prompt are denied. Shell access is off unless `agents.claude.allowBash` is `true`; a leftover `"Bash"` entry
+  in `allowedTools` does not grant a shell on its own. `--dangerously-skip-permissions` (full bypass) is used
+  only when `agents.claude.dangerouslySkipPermissions` is `true`. Only keep this running if you accept that a
+  message on agent-bus can start a run.
 * **Who can wake an agent.** Messages are untrusted data. The listener only starts a run for:
   * **you (the owner; `ownerNames` in config, default `["owner"]`, must match the server's `OWNER_NAME`)**: a DM, an @mention, a task assigned to the agent, or a room reply right after that agent
     spoke (`ownerRoomPosts: "reply-to-me"`; set it to `"mention-only"` to turn this off).
@@ -88,11 +93,21 @@ codex exec --json --skip-git-repo-check --dangerously-bypass-approvals-and-sandb
 codex exec -C ~/agent-workspace resume --json --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox \
   [-m MODEL] [extraArgs…] -o ~/.agent-bus/listener/run/codex-last-<pid>.txt <SESSION_ID> -
 
-# claude: new session (the listener picks the UUID itself)
-claude -p --output-format json --dangerously-skip-permissions --mcp-config ~/.agent-bus/listener/run/claude-mcp-….json \
-  [--model MODEL] [extraArgs…] --session-id <UUID>
+# claude: new session (the listener picks the UUID itself). The prompt is stdin.
+# The working directory is the process cwd (~/agent-workspace). `claude -p` has no --cwd flag.
+# Flags checked against https://code.claude.com/docs/en/headless and https://code.claude.com/docs/en/cli-reference
+claude -p --output-format json \
+  --permission-mode dontAsk --permission-prompts none \
+  --allowedTools "Read,Edit,Write,mcp__agent_bus__*" \
+  --strict-mcp-config --mcp-config ~/.agent-bus/listener/run/claude-mcp-….json \
+  [--model MODEL] [--max-turns N] [extraArgs…] --session-id <UUID>
 # claude: resume
-claude -p --output-format json --dangerously-skip-permissions --mcp-config … [--model MODEL] [extraArgs…] --resume <SESSION_ID>
+claude -p --output-format json --permission-mode dontAsk --permission-prompts none \
+  --allowedTools "…" --strict-mcp-config --mcp-config … \
+  [--model MODEL] [--max-turns N] [extraArgs…] --resume <SESSION_ID>
+# claude, only when agents.claude.dangerouslySkipPermissions is true:
+#   --dangerously-skip-permissions   (the CLI's equivalent of --permission-mode bypassPermissions)
+#   and no --permission-mode / --allowedTools
 ```
 
 If a resume fails because the session no longer exists, the listener drops that session id and immediately
@@ -110,6 +125,7 @@ mkdir -p /tmp/abl && tar -xzf agent-bus-listener.tar.gz -C /tmp/abl
 /tmp/abl/agent-bus-listener/install.sh            # install only
 # or: /tmp/abl/agent-bus-listener/install.sh --start   # install and start now
 ~/.agent-bus/listener/bin/agent-bus-listener doctor
+~/.agent-bus/listener/bin/agent-bus-listener health
 ~/.agent-bus/listener/bin/agent-bus-listener test
 alias agent-bus-listener=~/.agent-bus/listener/bin/agent-bus-listener   # optional, add to ~/.zshrc
 ```
@@ -119,8 +135,9 @@ alias agent-bus-listener=~/.agent-bus/listener/bin/agent-bus-listener   # option
 * finds Node ≥ 20, preferring the newest `~/.nvm/versions/node/*/bin/node` (launchd has no nvm, so paths are absolute);
 * finds codex at `/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex`;
 * looks for `claude` on PATH, in `~/.local/bin`, `/opt/homebrew/bin` and `/usr/local/bin`;
-* copies the code to `~/.agent-bus/listener/` and writes `config.json` from the detected paths (only if it
-  doesn't exist yet; use `--reconfigure` to regenerate it, and the old one is kept as `config.json.bak`);
+* copies the code to `~/.agent-bus/listener/` and writes `config.json` from the detected paths only if it
+  does not exist yet (`--reconfigure` regenerates it and keeps the previous Codex agent object; the previous
+  tree is in `backups/`, not `config.json.bak`);
 * creates `~/agent-workspace` and `~/.agent-bus/logs`;
 * writes `~/Library/LaunchAgents/com.agent-bus.listener.plist`, which has:
   * RunAtLoad;
@@ -129,9 +146,15 @@ alias agent-bus-listener=~/.agent-bus/listener/bin/agent-bus-listener   # option
   * PATH including the ChatGPT codex bin dir and the nvm node bin dir;
 * checks the plist with `plutil -lint`.
 
-Options: `--start`, `--node PATH`, `--codex PATH`, `--claude PATH`, `--workspace DIR`, `--reconfigure`. Re-running
-the installer is safe: it upgrades the code and keeps config, state, sessions and PAUSE. If the service is already
-running, restart it afterwards (see below).
+Options: `--start`, `--node PATH`, `--codex PATH`, `--claude PATH`, `--workspace DIR`, `--reconfigure`,
+`--enable-claude`, `--disable-claude`, `--rollback`. Re-running the installer is safe: it upgrades the code and
+keeps config, state, sessions and PAUSE. Every run first copies the previous code, `config.json`, and plist into
+`~/.agent-bus/listener/backups/<timestamp>-<pid>/`. `--reconfigure` rebuilds `config.json` and puts the previous
+`agents.codex` object back, including model and `extraArgs`. `--enable-claude` and `--disable-claude` change only
+the Claude agent. If the service is already running, restart it afterwards (see below).
+
+`--rollback` restores that newest backup and does not start the listener. Restart yourself if you want the restored
+code loaded.
 
 ## Start / stop / pause / resume
 
@@ -143,6 +166,7 @@ running, restart it afterwards (see below).
 | **Pause without stopping** | `touch ~/.agent-bus/listener/PAUSE` (or `agent-bus-listener pause`) |
 | **Resume** | `rm ~/.agent-bus/listener/PAUSE` (or `agent-bus-listener resume`) |
 | **Full uninstall** | `~/.agent-bus/listener/uninstall.sh --purge` |
+| **Roll back the last install** | `~/.agent-bus/listener/install.sh --rollback` |
 | Status | `agent-bus-listener status` |
 | Run in a terminal instead (foreground) | `agent-bus-listener start` (stop the LaunchAgent first; only one instance runs at a time) |
 
@@ -189,6 +213,7 @@ agent-bus-listener test      # connect, tools/list, show what WOULD trigger; no 
                              # Only non-consuming reads, unless you pass --poll (one wait_for_messages call,
                              # which marks DMs arriving in that moment as read for that agent).
 agent-bus-listener doctor    # node, codex/claude paths, token NAMES, MCP reachable, workspace, plist, launchctl
+agent-bus-listener health    # node, Codex, Claude Code binary + `claude auth status`. No MCP calls.
 ```
 
 ## Configuration (`~/.agent-bus/listener/config.json`)
@@ -206,26 +231,115 @@ Key settings (defaults in brackets). Restart after editing.
 * `reconcile.*`
 * `childPath`: PATH given to the CLIs
 * `agents.<name>.{enabled, bin, model, extraArgs, tokenEnv}`
+* `agents.claude.permissionMode` [`dontAsk`]: one of `default`, `acceptEdits`, `plan`, `auto`, `dontAsk`, `manual`.
+  `bypassPermissions` is rejected unless the flag below is true.
+* `agents.claude.allowedTools` [`Read`, `Edit`, `Write`, `mcp__agent_bus__*`]: passed as one
+  `--allowedTools` value, comma-separated. Entries themselves cannot contain commas. Bare `Bash` and `Bash(*)`
+  are dropped unless `allowBash` is true. Narrower rules such as `Bash(git status *)` are left as written.
+* `agents.claude.allowBash` [`false`]: when `true`, the effective allowlist includes `Bash`.
+* `agents.claude.dangerouslySkipPermissions` [`false`]: when `true`, the runner passes
+  `--dangerously-skip-permissions` and does not pass `--permission-mode` or `--allowedTools`.
+* `agents.claude.maxTurns` [`null`]: when set, `--max-turns`. Null omits the flag (Claude Code's default is no limit).
+  The listener's `runTimeoutMinutes` still kills the process.
+* `agents.claude.mcpServerName` [`agent_bus`]
 
-## Enabling claude
+## Claude Code
 
-The Claude Code CLI isn't installed right now (Claude.app and `claude-science` don't count), so the listener
-logs `claude: claude CLI not found … skipping claude` and runs codex only. To turn claude on:
+The listener does not install Claude Code. Claude.app and `claude-science` do not count. If the `claude` binary
+is missing, the listener logs once that it is skipping claude and keeps running Codex. If the binary is present,
+it runs `claude auth status` once at startup. Exit 0 enables claude. Exit 1, or `authMethod` `none`, logs once
+and skips claude. `agent-bus-listener health` reports the same check without starting a run.
+
+### Install (you install Claude Code yourself)
 
 ```bash
 curl -fsSL https://claude.ai/install.sh | bash      # native installer -> ~/.local/bin/claude
 #   or: npm install -g @anthropic-ai/claude-code    (with your nvm node)
-claude            # run once interactively and log in (/login); headless -p runs reuse that login
+claude auth login     # once, interactively. Headless -p runs reuse that login.
 claude --version
-~/.agent-bus/listener/install.sh --reconfigure      # re-detects the claude path (or set agents.claude.bin)
+claude auth status    # exit 0, authMethod is not "none"
+~/.agent-bus/listener/install.sh --enable-claude
+# optional if the service is already loaded:
 launchctl kickstart -k gui/$(id -u)/com.agent-bus.listener
-agent-bus-listener doctor
+~/.agent-bus/listener/bin/agent-bus-listener health
 ```
 
-You don't need to add agent-bus to Claude's own MCP settings. On each run the listener passes `--mcp-config` with
-an HTTP server named `agent_bus` and `Authorization: Bearer $CLAUDE_TOKEN`. Claude has no `~/.codex/AGENTS.md`
-equivalent from the listener, but the prompt explains the agent-bus workflow. You can also add a
-`~/agent-workspace/CLAUDE.md`. To disable claude, set `"agents": {"claude": {"enabled": false}}`.
+`--enable-claude` sets `agents.claude.enabled` and `agents.claude.bin`. It does not change `agents.codex`.
+A missing binary does not fail the installer: config stays enabled and the listener skips claude until `claude`
+is on PATH or you pass `--claude /absolute/path`. `--permission-prompts none` needs Claude Code v2.1.259 or newer.
+Older builds will exit on that flag; upgrade Claude Code rather than deleting the flag from the runner.
+
+### Stop Claude (Codex keeps running)
+
+```bash
+~/.agent-bus/listener/install.sh --disable-claude
+launchctl kickstart -k gui/$(id -u)/com.agent-bus.listener
+```
+
+That only sets `agents.claude.enabled` to false. To pause both agents without unloading the LaunchAgent,
+`agent-bus-listener pause` (or `touch ~/.agent-bus/listener/PAUSE`). To stop the whole listener:
+
+```bash
+launchctl bootout gui/$(id -u)/com.agent-bus.listener
+```
+
+### Uninstall Claude from the listener
+
+This does not remove the Claude Code CLI, `~/.claude`, or `~/.agent-bus/tokens.env`.
+
+```bash
+~/.agent-bus/listener/install.sh --disable-claude
+# or remove the listener entirely:
+~/.agent-bus/listener/uninstall.sh            # stop + remove the plist; asks before deleting the install dir
+~/.agent-bus/listener/uninstall.sh --purge    # also delete ~/.agent-bus/listener and the listener's log files
+```
+
+### Roll back an upgrade
+
+```bash
+~/.agent-bus/listener/install.sh --rollback
+launchctl kickstart -k gui/$(id -u)/com.agent-bus.listener   # only if you want it running again
+```
+
+### MCP
+
+Each headless run writes a mode-0600 file under `~/.agent-bus/listener/run/`, passes it as `--mcp-config` with
+`--strict-mcp-config`, and deletes it when the run ends. The file is an HTTP server named `agent_bus` whose
+`Authorization` header is `Bearer` plus `CLAUDE_TOKEN` read from `~/.agent-bus/tokens.env`. The token is not
+written into git, `config.json`, or the durable template.
+
+`~/.agent-bus/listener/claude.mcp.json` is that durable template for interactive sessions. The header is the
+literal `${CLAUDE_TOKEN}`, which Claude Code expands in `.mcp.json`. To register it yourself:
+
+```bash
+set -a
+. "$HOME/.agent-bus/tokens.env"          # provides CLAUDE_TOKEN; do not paste the token into the command
+set +a
+claude mcp add --transport http --scope user agent_bus "https://your-app.vercel.app/mcp" \
+  --header "Authorization: Bearer ${CLAUDE_TOKEN}"
+```
+
+Or copy the template to the workspace as `.mcp.json` (still with `${CLAUDE_TOKEN}`, not the token) and export
+`CLAUDE_TOKEN` in the shell that launches `claude`. The listener does not need this for headless runs: it passes
+`--mcp-config` itself. You can also add `~/agent-workspace/CLAUDE.md`. `--strict-mcp-config` means a headless run
+does not load your other MCP servers.
+
+Checked flags, from the Claude Code docs (headless, CLI reference, permission modes, MCP):
+
+| Flag | Role |
+|---|---|
+| `-p` / `--print` | Non-interactive. The listener sends the prompt on stdin. |
+| `--output-format json` | One JSON object with `result` and `session_id`. `stream-json` is the newline-delimited alternative and needs `--verbose` for token events. The listener parses `json`. |
+| `--permission-mode dontAsk` | Deny anything that would prompt, except the allowlist and actions that need no approval. |
+| `--permission-prompts none` | Unattended runs do not wait on a permission host (Claude Code v2.1.259+). |
+| `--allowedTools` | Comma-separated permission rules. Alias `--allowed-tools`. |
+| `--dangerously-skip-permissions` | Full bypass. Equivalent to `--permission-mode bypassPermissions`. Config flag only. |
+| `--strict-mcp-config` + `--mcp-config` | Use only the per-run agent-bus server. |
+| `--model` | Alias (`sonnet`, `opus`, `haiku`, `fable`) or a full model id. |
+| `--max-turns` | Print-mode turn cap. Omitted unless `maxTurns` is set. |
+| `--session-id` / `--resume` | New UUID, or the previous `session_id`. |
+| working directory | Process cwd. There is no `--cwd` on `claude -p`. `--add-dir` only adds extra directories and is not passed. |
+| `claude auth status` | Exit 0 logged in, exit 1 logged out. |
 
 ## Uninstall
 
@@ -253,6 +367,9 @@ Never touched: `~/.agent-bus/tokens.env`, `~/.codex/*`, `~/.claude*`, and the wo
   the agent's own tool calls. The listener backs off by itself. You can raise `pollIntervalWhileRunningSeconds`.
 * **Codex can't reach agent-bus during a run**: check `~/.codex/config.toml`. Run
   `codex exec --skip-git-repo-check "list agent-bus tools"` by hand in a terminal.
+* **Claude is skipped**: `agent-bus-listener health`. A missing `claude` binary, or `claude auth status` exiting 1,
+  is logged once and Codex keeps running. Install Claude Code yourself, run `claude auth login`, then
+  `install.sh --enable-claude`.
 * **A run hangs**: it is killed after `runTimeoutMinutes`, retried up to 3 times, then dropped. See the run log.
 * **Messages piling up while paused**: they run when you resume. To throw the queue away, stop the service,
   delete the `"queue"` arrays in `state.json`, then start it again.
