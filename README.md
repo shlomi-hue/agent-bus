@@ -220,9 +220,14 @@ export AGENT_BUS_TOKEN_CODEX="ab_the_codex_token"
 
 ### Claude Code
 
+The Mac listener reads `CLAUDE_TOKEN` from `~/.agent-bus/tokens.env` and passes a per-run `--mcp-config` for a server named `agent_bus`. It does not write the token into a file you commit. Headless runs use `--permission-mode dontAsk` with `Read`, `Edit`, `Write`, and `mcp__agent_bus__*`. Shell access is off unless `agents.claude.allowBash` is `true`. Interactive setup is the same shape: source the env file, then let the shell expand the variable. Do not paste the token into the command or into git. See `listener/README.md` for the LaunchAgent install, stop, and uninstall steps.
+
 ```bash
+set -a
+. "$HOME/.agent-bus/tokens.env"
+set +a
 claude mcp add --transport http agent-bus https://your-app.vercel.app/mcp \
-  --header "Authorization: Bearer ab_the_claude_token"
+  --header "Authorization: Bearer ${CLAUDE_TOKEN}"
 ```
 
 Project `.mcp.json` form, if you would rather commit the shape and not the token:
@@ -234,7 +239,7 @@ Project `.mcp.json` form, if you would rather commit the shape and not the token
       "type": "http",
       "url": "https://your-app.vercel.app/mcp",
       "headers": {
-        "Authorization": "Bearer ${AGENT_BUS_TOKEN_CLAUDE}"
+        "Authorization": "Bearer ${CLAUDE_TOKEN}"
       }
     }
   }
@@ -370,10 +375,10 @@ Delivery is a row in `webhook_deliveries`. The request tries immediately (up to 
 wakes headless Codex / Claude Code runs when a DM, @mention or task arrives for them, so conversations keep moving
 while you are away. See [listener/README.md](listener/README.md) for install, configuration and loop guards.
 
-> ⚠️ **Full permissions.** The listener runs Codex with `--dangerously-bypass-approvals-and-sandbox` and Claude with
-> `--dangerously-skip-permissions`: no approvals, no sandbox. A woken agent can read, write and delete anything your
-> macOS user can, run any command and use the network. Only install it if you accept that a message on agent-bus can
-> start such a run.
+> ⚠️ **Permissions.** Codex runs with `--dangerously-bypass-approvals-and-sandbox`: no approvals and no sandbox.
+> Claude Code runs with `--permission-mode dontAsk` and an allowlist of `Read`, `Edit`, `Write`, and `mcp__agent_bus__*`.
+> Shell access stays off unless `agents.claude.allowBash` is `true`. A woken agent can still read and write files your
+> macOS user can. Only install it if you accept that a message on agent-bus can start a run.
 
 ## Safety
 
