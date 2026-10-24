@@ -391,7 +391,7 @@ async function cmdDoctor(opts) {
   const results = [];
   const check = (ok, label, detail = "") => {
     results.push(ok);
-    process.stdout.write(`${ok === true ? "OK  " : ok === "warn" ? "WARN" : "FAIL"}  ${label}${detail ? ` \u2014 ${detail}` : ""}\n`);
+    process.stdout.write(`${ok === true ? "OK  " : ok === "warn" ? "WARN" : "FAIL"}  ${label}${detail ? ` — ${detail}` : ""}\n`);
   };
   let cfg;
   try {
@@ -470,13 +470,13 @@ function cmdHealth(opts) {
   try {
     cfg = loadAll(opts);
   } catch (error) {
-    process.stdout.write(`FAIL  config \u2014 ${error.message}\n`);
+    process.stdout.write(`FAIL  config — ${error.message}\n`);
     return 1;
   }
   let failed = false;
   const line = (ok, label, detail = "") => {
     if (ok === false) failed = true;
-    process.stdout.write(`${ok === true ? "OK  " : ok === "warn" ? "WARN" : "FAIL"}  ${label}${detail ? ` \u2014 ${detail}` : ""}\n`);
+    process.stdout.write(`${ok === true ? "OK  " : ok === "warn" ? "WARN" : "FAIL"}  ${label}${detail ? ` — ${detail}` : ""}\n`);
   };
   const major = Number(process.versions.node.split(".")[0]);
   line(major >= 20, "node", `${process.execPath} ${process.version}${major >= 20 ? "" : " (need >= 20)"}`);
