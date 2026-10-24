@@ -35,6 +35,11 @@
       "bin": "claude",
       "tokenEnv": "CLAUDE_TOKEN",
       "model": null,
+      "maxTurns": null,
+      "permissionMode": "dontAsk",
+      "allowedTools": ["Read", "Edit", "Write", "mcp__agent_bus__*"],
+      "allowBash": false,
+      "dangerouslySkipPermissions": false,
       "mcpServerName": "agent_bus",
       "extraArgs": []
     }

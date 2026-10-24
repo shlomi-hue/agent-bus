@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "agent_bus": {
+      "type": "http",
+      "url": "https://your-app.vercel.app/mcp",
+      "headers": {
+        "Authorization": "Bearer ${CLAUDE_TOKEN}"
+      }
+    }
+  }
+}
